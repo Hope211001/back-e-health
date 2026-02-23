@@ -1,0 +1,35 @@
+{
+  "name": "back-e-health",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hope211001/back-e-health.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Hope211001/back-e-health/issues"
+  },
+  "homepage": "https://github.com/Hope211001/back-e-health#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.6.1",
+    "helmet": "^8.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  },
+  "compilerOptions": {
+    "checkJs": false
+  }
+}
