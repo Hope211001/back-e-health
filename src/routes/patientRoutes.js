@@ -1,14 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const patientController = require('../controllers/patientController');
+const { verifyTokenAndRole } = require('../middlewares/authMiddleware');
 
-// GET /api/patients
-router.get('/', patientController.getAllPatients);
+// Route pour la liste
+router.get('/', verifyTokenAndRole(['medecin']), patientController.getPatientsByMedecin);
 
-// GET /api/patients/:id
-router.get('/:id', patientController.getPatientById);
+// Route pour la recherche
+router.get('/search', verifyTokenAndRole(['medecin']), patientController.searchPatients);
 
-// Ton ancienne route POST
-router.post('/', patientController.createPatient);
+router.get('/:id', verifyTokenAndRole(['medecin', 'superadmin']), patientController.getPatientById);
 
 module.exports = router;

@@ -1,75 +1,83 @@
-const { db, auth } = require('../config/firebase');
+const { db } = require('../config/firebase');
 
-exports.createPatient = async (req, res) => {
+// Récupérer les patients du médecin connecté
+exports.getPatientsByMedecin = async (req, res) => {
     try {
-        const { email, password, nom, prenom, telephone, role, ...patientData } = req.body;
+        const medecinId = req.user.uid;
+        console.log("🔍 Recherche patients pour le docteur UID :", medecinId);
 
-        // 1. Création du compte dans Firebase Auth
-        const userRecord = await auth.createUser({
-            email,
-            password,
-            displayName: `${prenom} ${nom}`,
-            phoneNumber: telephone
-        });
+        const snapshot = await db.collection('patients')
+            .where('medecinTraitantId', '==', medecinId) // <--- Vérifie bien ce nom !
+            .get();
 
-        // 2. Préparation de l'objet Patient selon ton interface TS
-        const newPatient = {
-            userId: userRecord.uid,
-            nom,
-            prenom,
-            email,
-            role: 'patient',
-            telephone,
-            statut: 'actif',
-            dateCreation: new Date(), // Deviendra un Timestamp dans Firestore
-            ...patientData // contient numeroPatient, groupeSanguin, allergies, etc.
-        };
-
-        // 3. Enregistrement dans Firestore
-        await db.collection('patients').doc(userRecord.uid).set(newPatient);
-
-        res.status(201).json({
-            message: "Patient créé avec succès",
-            patientId: userRecord.uid
-        });
-
-    } catch (error) {
-        console.error("Erreur creation patient:", error);
-        res.status(500).json({ error: error.message });
-    }
-};
-
-
-
-// RÉCUPÉRER TOUS LES PATIENTS
-exports.getAllPatients = async (req, res) => {
-    try {
-        const snapshot = await db.collection('patients').get();
-
-        // On transforme le snapshot Firebase en un tableau d'objets JS
         const patients = snapshot.docs.map(doc => ({
             id: doc.id,
             ...doc.data()
         }));
 
-        res.status(200).json(patients);
+        console.log(`✅ ${patients.length} patients trouvés.`);
+        res.json(patients);
     } catch (error) {
-        res.status(500).json({ error: "Erreur lors de la récupération : " + error.message });
+        console.error("❌ Erreur backend :", error.message);
+        res.status(500).json({ error: error.message });
     }
 };
 
-// RÉCUPÉRER UN PATIENT PAR SON ID
+// Rechercher un patient (par numéro ou email)
+exports.searchPatients = async (req, res) => {
+    try {
+        const { q } = req.query;
+        const medecinId = req.user.uid;
+
+        // Note: Firestore backend ne permet pas facilement le "OR". 
+        // On récupère les patients du médecin et on filtre en JS ou on fait 2 requêtes.
+        const snapshot = await db.collection('patients')
+            .where('medecinTraitantId', '==', medecinId)
+            .get();
+
+        const patients = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        const filtered = patients.filter(p => 
+            p.numeroPatient.toLowerCase().includes(q.toLowerCase()) || 
+            p.email.toLowerCase().includes(q.toLowerCase())
+        );
+
+        res.json(filtered);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+
 exports.getPatientById = async (req, res) => {
     try {
-        const patientId = req.params.id;
-        const doc = await db.collection('patients').doc(patientId).get();
+        const { id } = req.params;
+        console.log(`🔍 Requête reçue pour le patient ID: [${id}] (Longueur: ${id.length})`);
 
+        // 1. On cherche par l'ID du document
+        let doc = await db.collection('patients').doc(id).get();
+
+        // 2. Si non trouvé (ou ID tronqué), on cherche par le champ userId
         if (!doc.exists) {
-            return res.status(404).json({ message: "Patient non trouvé" });
+            const snapshot = await db.collection('patients')
+                .where('userId', '==', id)
+                .limit(1)
+                .get();
+            
+            if (!snapshot.empty) {
+                doc = snapshot.docs[0];
+            }
         }
 
-        res.status(200).json({ id: doc.id, ...doc.data() });
+        if (!doc.exists || (doc.empty && !doc.data)) {
+            console.log("❌ Patient introuvable dans Firestore");
+            return res.status(404).json({ error: "Patient non trouvé" });
+        }
+
+        console.log("✅ Patient trouvé :", doc.data().email);
+        res.json({ id: doc.id, ...doc.data() });
     } catch (error) {
+        console.error("Erreur serveur :", error.message);
         res.status(500).json({ error: error.message });
     }
 };
