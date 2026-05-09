@@ -26,4 +26,7 @@ router.get('/:id', verifyTokenAndRole(['medecin', 'patient', 'superadmin']), pre
 // Le patient démarre sa prescription
 router.put('/:id/start', verifyTokenAndRole(['patient']), prescriptionController.startPrescription);
 
+// Le patient sauvegarde les horaires propres à une prescription
+router.put('/:id/horaires', verifyTokenAndRole(['patient']), prescriptionController.updatePrescriptionHoraires);
+
 module.exports = router;

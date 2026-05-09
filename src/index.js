@@ -29,8 +29,8 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Serveur Express accessible sur : http://192.168.0.148:${PORT}`);
 
-    // Vérification des médicaments manqués toutes les 10 minutes
-    const CHECK_INTERVAL = 10 * 60 * 1000;
+    // Vérification des médicaments manqués toutes les 5 min (équilibre démo/quota Firebase)
+    const CHECK_INTERVAL = 5 * 60 * 1000;
     setInterval(checkMissedMedications, CHECK_INTERVAL);
-    console.log(`🔔 Vérification des médicaments manqués activée (toutes les 10 min)`);
+    console.log(`🔔 Vérification des médicaments manqués activée (toutes les 5 min)`);
 });

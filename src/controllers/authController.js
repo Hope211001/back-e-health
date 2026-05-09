@@ -4,12 +4,24 @@ exports.registerPatient = async (req, res) => {
         const { email, password, tel } = req.body;
         const medecinId = req.user.uid;
 
-        // Nettoyage du tel : si l'utilisateur saisit 034... on enlève le 0 pour faire +26134...
-        let cleanTel = tel.trim();
+        // Nettoyage : on garde uniquement les chiffres et le + initial
+        let cleanTel = (tel || '').trim().replace(/[\s\-\.\(\)]/g, '');
+        const hadPlus = cleanTel.startsWith('+');
+        cleanTel = cleanTel.replace(/[^0-9]/g, '');
+
+        // Format malgache : on retire le 0 initial puis on préfixe +261
         if (cleanTel.startsWith('0')) {
             cleanTel = cleanTel.substring(1);
         }
-        const formattedTel = cleanTel.startsWith('+') ? cleanTel : `+261${cleanTel}`;
+        const formattedTel = hadPlus ? `+${cleanTel}` : `+261${cleanTel}`;
+
+        // Validation longueur : numéro malgache mobile = 9 chiffres après +261
+        const digitsAfterPlus = formattedTel.replace(/\D/g, '');
+        if (digitsAfterPlus.length < 11 || digitsAfterPlus.length > 15) {
+            return res.status(400).json({
+                error: `Numéro de téléphone invalide. Format attendu : 034 XX XXX XX (ex: 0341234567)`
+            });
+        }
 
         // 1. Création Auth
         const userRecord = await admin.auth().createUser({

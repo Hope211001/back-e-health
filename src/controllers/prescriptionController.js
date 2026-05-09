@@ -146,6 +146,7 @@ exports.startPrescription = async (req, res) => {
     try {
         const { id } = req.params;
         const patientId = req.user.uid;
+        const horairesFromBody = req.body?.horairesRappel || null;
 
         const docRef = db.collection('prescriptions').doc(id);
         const docSnap = await docRef.get();
@@ -167,10 +168,12 @@ exports.startPrescription = async (req, res) => {
             return res.status(400).json({ error: "Cette prescription est déjà terminée" });
         }
 
-        // Lire les horaires personnalisés du patient
-        const patientDoc = await db.collection('patients').doc(patientId).get();
-        const patientData = patientDoc.exists ? patientDoc.data() : {};
-        const horaires = patientData.horairesRappel || {};
+        // Priorité : body > prescription.horairesRappel > patient.horairesRappel > défaut
+        let horaires = horairesFromBody || prescription.horairesRappel;
+        if (!horaires) {
+            const patientDoc = await db.collection('patients').doc(patientId).get();
+            horaires = patientDoc.exists ? (patientDoc.data().horairesRappel || {}) : {};
+        }
         const heuresMap = {
             matin: horaires.matin || '08:00',
             midi:  horaires.midi  || '12:00',
@@ -183,11 +186,12 @@ exports.startPrescription = async (req, res) => {
         const dateFin = new Date();
         dateFin.setDate(dateDebut.getDate() + duree);
 
-        // Mise à jour de la prescription
+        // Mise à jour de la prescription (avec horaires figés sur la prescription)
         await docRef.update({
             dateDebut: admin.firestore.Timestamp.fromDate(dateDebut),
             dateFin: admin.firestore.Timestamp.fromDate(dateFin),
             statut: 'en_cours',
+            horairesRappel: heuresMap,
         });
 
         // Génération des alertes
@@ -306,6 +310,45 @@ exports.markAlertePrise = async (req, res) => {
         res.json({ message: "Médicament marqué comme pris" });
     } catch (error) {
         console.error("Erreur markAlertePrise:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * Sauvegarde les horaires de rappel propres à une prescription (sans la démarrer)
+ */
+exports.updatePrescriptionHoraires = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const patientId = req.user.uid;
+        const { horairesRappel } = req.body;
+
+        if (!horairesRappel || typeof horairesRappel !== 'object') {
+            return res.status(400).json({ error: "horairesRappel requis" });
+        }
+
+        const docRef = db.collection('prescriptions').doc(id);
+        const docSnap = await docRef.get();
+
+        if (!docSnap.exists) {
+            return res.status(404).json({ error: "Ordonnance introuvable" });
+        }
+
+        if (docSnap.data().patientId !== patientId) {
+            return res.status(403).json({ error: "Accès non autorisé" });
+        }
+
+        const heuresMap = {
+            matin: horairesRappel.matin || '08:00',
+            midi:  horairesRappel.midi  || '12:00',
+            soir:  horairesRappel.soir  || '20:00',
+        };
+
+        await docRef.update({ horairesRappel: heuresMap });
+
+        res.json({ message: "Horaires sauvegardés", horairesRappel: heuresMap });
+    } catch (error) {
+        console.error("Erreur updatePrescriptionHoraires:", error.message);
         res.status(500).json({ error: error.message });
     }
 };

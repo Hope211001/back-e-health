@@ -8,7 +8,7 @@ const { admin, db } = require('../config/firebase');
 const { createNotification } = require('./notificationService');
 
 // Tolérance en minutes avant de considérer un médicament comme manqué
-const TOLERANCE_MINUTES = 30;
+const TOLERANCE_MINUTES = 5;
 
 /**
  * Vérifie toutes les alertes du jour qui sont en retard
