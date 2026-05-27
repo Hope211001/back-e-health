@@ -5,7 +5,7 @@
  */
 const express = require('express');
 const router = express.Router();
-const controller = require('./conversationController');
+const controller = require('../controllers/conversationController');
 const { verifyTokenAndRole } = require('../middlewares/authMiddleware');
 
 const ROLES = ['medecin', 'patient'];

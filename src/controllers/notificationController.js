@@ -8,7 +8,7 @@ const {
     countUnread,
     markAsRead,
     markAllAsRead,
-} = require('./notificationService');
+} = require('../services/notificationService');
 
 /**
  * GET /api/notifications

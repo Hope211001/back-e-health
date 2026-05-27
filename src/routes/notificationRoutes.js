@@ -5,7 +5,7 @@
  */
 const express = require('express');
 const router = express.Router();
-const notificationController = require('./notificationController');
+const notificationController = require('../controllers/notificationController');
 const { verifyTokenAndRole } = require('../middlewares/authMiddleware');
 
 const ROLES = ['medecin', 'patient'];

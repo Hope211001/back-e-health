@@ -4,7 +4,7 @@
  * Service Firestore pour les collections "conversations" et "messages".
  */
 const { admin, db } = require('../config/firebase');
-const { createNotification } = require('../notifications/notificationService');
+const { createNotification } = require('./notificationService');
 
 const CONVERSATIONS = 'conversations';
 const MESSAGES = 'messages';

@@ -9,7 +9,7 @@ const {
     sendMessage,
     getMessages,
     markConversationAsRead,
-} = require('./conversationService');
+} = require('../services/conversationService');
 
 /**
  * POST /api/conversations

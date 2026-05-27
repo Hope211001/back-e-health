@@ -8,9 +8,9 @@ const { db } = require('./config/firebase');
 const patientRoutes = require('./routes/patientRoutes');
 const authRoutes = require('./routes/authRoutes');
 const prescriptionRoutes = require('./routes/prescriptionRoutes');
-const notificationRoutes = require('./notifications/notificationRoutes');
-const conversationRoutes = require('./conversations/conversationRoutes');
-const { checkMissedMedications } = require('./notifications/checkMissedMedications');
+const notificationRoutes = require('./routes/notificationRoutes');
+const conversationRoutes = require('./routes/conversationRoutes');
+const { checkMissedMedications } = require('./services/checkMissedMedications');
 
 const app = express();
 app.use(helmet());
