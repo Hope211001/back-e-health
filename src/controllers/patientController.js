@@ -7,7 +7,7 @@ exports.getPatientsByMedecin = async (req, res) => {
         console.log("🔍 Recherche patients pour le docteur UID :", medecinId);
 
         const snapshot = await db.collection('patients')
-            .where('medecinTraitantId', '==', medecinId) // <--- Vérifie bien ce nom !
+            .where('medecinTraitantId', '==', medecinId) 
             .get();
 
         const patients = snapshot.docs.map(doc => ({
