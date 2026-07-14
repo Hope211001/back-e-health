@@ -10,7 +10,9 @@ const authRoutes = require('./routes/authRoutes');
 const prescriptionRoutes = require('./routes/prescriptionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const conversationRoutes = require('./routes/conversationRoutes');
+const pharmacieGardeRoutes = require('./routes/pharmacieGardeRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
+const { watchPharmacieGarde } = require('./services/watchPharmacieGarde');
 
 const app = express();
 app.use(helmet());
@@ -24,13 +26,21 @@ app.use('/api/auth', authRoutes);
 app.use('/api/prescription', prescriptionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/conversations', conversationRoutes);
+app.use('/api/pharmacie-garde', pharmacieGardeRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Serveur Express accessible sur : http://192.168.0.148:${PORT}`);
 
-    // Vérification des médicaments manqués toutes les 5 min (équilibre démo/quota Firebase)
-    const CHECK_INTERVAL = 5 * 60 * 1000;
+    // Vérification des médicaments manqués toutes les 15 min.
+    // La tolérance étant de 1 h (TOLERANCE_MINUTES=60), un scan aux 15 min
+    // suffit à détecter rapidement les oublis, tout en ménageant le quota Firestore.
+    const CHECK_INTERVAL = 15 * 60 * 1000;
     setInterval(checkMissedMedications, CHECK_INTERVAL);
-    console.log(`🔔 Vérification des médicaments manqués activée (toutes les 5 min)`);
+    console.log(`🔔 Vérification des médicaments manqués activée (toutes les 15 min)`);
+
+    // Écoute temps réel : convertit automatiquement les images des nouvelles
+    // pharmacies de garde (liens Facebook → Firebase Storage). Aucun changement
+    // du workflow n8n nécessaire.
+    watchPharmacieGarde();
 });

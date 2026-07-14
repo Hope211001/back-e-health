@@ -11,6 +11,10 @@ if (!admin.apps.length) {
   try {
     admin.initializeApp({
       credential: admin.credential.cert(firebaseConfig),
+      // Bucket Storage pour ré-héberger les images (pharmacies de garde, etc.).
+      // À définir dans .env : FIREBASE_STORAGE_BUCKET=e-health-cb942.appspot.com
+      // (ou e-health-cb942.firebasestorage.app selon Firebase Console → Storage).
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || `${firebaseConfig.projectId}.appspot.com`,
     });
     console.log("✅ Backend : Firebase Admin Initialisé");
   } catch (error) {
