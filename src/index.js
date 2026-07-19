@@ -12,7 +12,6 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const conversationRoutes = require('./routes/conversationRoutes');
 const pharmacieGardeRoutes = require('./routes/pharmacieGardeRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
-const { watchPharmacieGarde } = require('./services/watchPharmacieGarde');
 
 const app = express();
 app.use(helmet());
@@ -39,8 +38,8 @@ app.listen(PORT, "0.0.0.0", () => {
     setInterval(checkMissedMedications, CHECK_INTERVAL);
     console.log(`🔔 Vérification des médicaments manqués activée (toutes les 15 min)`);
 
-    // Écoute temps réel : convertit automatiquement les images des nouvelles
-    // pharmacies de garde (liens Facebook → Firebase Storage). Aucun changement
-    // du workflow n8n nécessaire.
-    watchPharmacieGarde();
+    // NB : le ré-hébergement des images des pharmacies de garde est désormais
+    // fait directement dans le workflow n8n (upload Cloudinary avant l'écriture
+    // Firestore). L'ancien listener onSnapshot a été supprimé pour ne plus
+    // consommer de quota Firestore en continu.
 });

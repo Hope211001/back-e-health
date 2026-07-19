@@ -10,9 +10,9 @@ const { verifyTokenAndRole } = require('../middlewares/authMiddleware');
 
 const ROLES = ['superadmin', 'admin'];
 
-// NB : l'ingestion des images est automatique (listener Firestore côté backend,
-// voir services/watchPharmacieGarde.js). Le workflow n8n écrit directement dans
-// Firestore — pas d'endpoint d'import ni de bouton manuel nécessaires.
+// NB : le workflow n8n écrit directement dans Firestore, images déjà ré-hébergées
+// sur Cloudinary (upload fait dans n8n). Pas d'endpoint d'import ni de traitement
+// d'images côté backend.
 // Côté patient : liste des pharmacies de garde visibles (avant '/:id').
 router.get('/visible', verifyTokenAndRole(['patient', 'medecin', 'admin', 'superadmin']), ctrl.getVisible);
 
