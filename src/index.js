@@ -11,6 +11,7 @@ const prescriptionRoutes = require('./routes/prescriptionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const conversationRoutes = require('./routes/conversationRoutes');
 const pharmacieGardeRoutes = require('./routes/pharmacieGardeRoutes');
+const statsRoutes = require('./routes/statsRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
 
 const app = express();
@@ -26,6 +27,7 @@ app.use('/api/prescription', prescriptionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/pharmacie-garde', pharmacieGardeRoutes);
+app.use('/api/stats', statsRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {

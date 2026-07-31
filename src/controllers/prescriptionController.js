@@ -334,7 +334,8 @@ exports.updatePrescriptionHoraires = async (req, res) => {
             return res.status(404).json({ error: "Ordonnance introuvable" });
         }
 
-        if (docSnap.data().patientId !== patientId) {
+        const prescription = docSnap.data();
+        if (prescription.patientId !== patientId) {
             return res.status(403).json({ error: "Accès non autorisé" });
         }
 
@@ -346,7 +347,28 @@ exports.updatePrescriptionHoraires = async (req, res) => {
 
         await docRef.update({ horairesRappel: heuresMap });
 
-        res.json({ message: "Horaires sauvegardés", horairesRappel: heuresMap });
+        // Traitement déjà démarré : on répercute les nouvelles heures sur les
+        // alertes pas encore déclenchées. Celles déjà notifiées/prises/manquées
+        // restent inchangées (on ne réécrit pas l'historique).
+        let alertesMisesAJour = 0;
+        if (prescription.statut === 'en_cours') {
+            const alertesSnap = await db.collection('alertes')
+                .where('prescriptionId', '==', id)
+                .where('statut', '==', 'en_attente')
+                .get();
+
+            const batch = db.batch();
+            alertesSnap.forEach((alerteDoc) => {
+                const nouvelleHeure = heuresMap[alerteDoc.data().moment];
+                if (nouvelleHeure) {
+                    batch.update(alerteDoc.ref, { heurePrevu: nouvelleHeure });
+                    alertesMisesAJour++;
+                }
+            });
+            if (alertesMisesAJour > 0) await batch.commit();
+        }
+
+        res.json({ message: "Horaires sauvegardés", horairesRappel: heuresMap, alertesMisesAJour });
     } catch (error) {
         console.error("Erreur updatePrescriptionHoraires:", error.message);
         res.status(500).json({ error: error.message });
