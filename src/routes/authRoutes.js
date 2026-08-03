@@ -8,10 +8,12 @@ router.post('/login', authController.login);
 router.post('/google-signin', authController.googleSignIn);
 router.post('/forgot-password', authController.forgotPassword);
 
-// Patient créé par un médecin
+// Patient créé par son médecin traitant, ou par l'administration. Dans ce
+// second cas le médecin traitant ne peut pas être déduit du token : il doit
+// être fourni dans le corps (`medecinId`).
 router.post(
     '/register-patient',
-    verifyTokenAndRole(['medecin']),
+    verifyTokenAndRole(['medecin', 'admin', 'superadmin']),
     authController.registerPatient
 );
 
@@ -36,10 +38,11 @@ router.get(
     authController.listUsersByRole
 );
 
-// Activer/désactiver un compte
+// Activer/désactiver un compte (médecin, patient ou admin) — superadmin uniquement.
+// L'admin a un accès en lecture seule aux listes d'utilisateurs.
 router.patch(
     '/users/:uid/statut',
-    verifyTokenAndRole(['admin', 'superadmin']),
+    verifyTokenAndRole(['superadmin']),
     authController.toggleUserStatut
 );
 

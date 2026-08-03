@@ -16,11 +16,28 @@ function formatTelephoneMalgache(tel) {
     return formatted;
 }
 
-// --- REGISTER PATIENT (par un medecin) ---
+// --- REGISTER PATIENT (par son médecin traitant, ou par l'administration) ---
 exports.registerPatient = async (req, res) => {
     try {
-        const { email, password, tel } = req.body;
-        const medecinId = req.user.uid;
+        const { email, password, tel, nom, prenom } = req.body;
+
+        // Un médecin s'attribue automatiquement le patient. Un admin, lui, doit
+        // désigner le médecin traitant : le déduire de son propre token
+        // rattacherait le patient à un compte admin, ce qui n'a aucun sens
+        // métier et casserait les écrans « mes patients » côté médecin.
+        let medecinId = req.user.uid;
+        if (req.user.role !== 'medecin') {
+            medecinId = (req.body.medecinId || '').trim();
+            if (!medecinId) {
+                return res.status(400).json({
+                    error: "Le médecin traitant est requis (champ 'medecinId').",
+                });
+            }
+            const medecinSnap = await db.collection('users').doc(medecinId).get();
+            if (!medecinSnap.exists || medecinSnap.data().role !== 'medecin') {
+                return res.status(400).json({ error: "Le médecin traitant indiqué est introuvable." });
+            }
+        }
 
         const formattedTel = formatTelephoneMalgache(tel);
 
@@ -38,6 +55,10 @@ exports.registerPatient = async (req, res) => {
             uid,
             email,
             role: 'patient',
+            // Facultatifs : les écrans de liste retombent sur l'email quand
+            // l'état civil n'est pas renseigné.
+            nom: (nom || '').trim(),
+            prenom: (prenom || '').trim(),
             telephone: formattedTel,
             statut: 'actif',
             authProvider: 'password',
@@ -49,6 +70,8 @@ exports.registerPatient = async (req, res) => {
             id: uid,
             userId: uid,
             email,
+            nom: (nom || '').trim(),
+            prenom: (prenom || '').trim(),
             telephone: formattedTel,
             numeroPatient: `PAT-${Date.now().toString().slice(-4)}`,
             medecinTraitantId: medecinId,
@@ -296,26 +319,103 @@ exports.logout = async (req, res) => {
     }
 };
 
-// --- LISTE UTILISATEURS PAR ROLE (admin/superadmin) ---
+const USERS_PAGE_SIZE = 20;
+const USERS_PAGE_SIZE_MAX = 100;
+
+/**
+ * Normalise une chaîne pour la recherche : minuscules et sans accents, pour que
+ * "Rakoto" trouve "rakoto" et "Réné" trouve "rene".
+ */
+function normaliser(valeur) {
+    return String(valeur ?? '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** Entier positif borné, avec repli sur `defaut` si le paramètre est invalide. */
+function entierPositif(valeur, defaut, max) {
+    const n = parseInt(valeur, 10);
+    if (!Number.isFinite(n) || n < 1) return defaut;
+    return max ? Math.min(n, max) : n;
+}
+
+/**
+ * GET /api/auth/users?role=&q=&page=&limit=&all=
+ * Liste des utilisateurs, avec recherche libre sur le nom, le prénom, l'email
+ * et le téléphone. Admin et superadmin.
+ *
+ * Paginée par défaut (pour les écrans de liste), mais `all=true` renvoie tout :
+ * les sélecteurs (choix d'un médecin traitant, par exemple) ont besoin de la
+ * liste complète, et une troncature silencieuse y serait un vrai bug.
+ * Ce mode ne coûte rien de plus : la recherche impose déjà de charger tous les
+ * documents en mémoire, la pagination ne fait que découper le résultat.
+ *
+ * Firestore ne sait pas faire de recherche "contient" ni de OR sur plusieurs
+ * champs : comme ailleurs dans le projet (searchPatients, checkMissedMedications),
+ * on filtre en JS après une seule clause `where`, ce qui évite aussi d'avoir à
+ * créer un index composite.
+ */
 exports.listUsersByRole = async (req, res) => {
     try {
-        const { role } = req.query;
+        const { role, q } = req.query;
+        const tout = req.query.all === 'true' || req.query.all === '1';
+        const page = entierPositif(req.query.page, 1);
+        const limit = entierPositif(req.query.limit, USERS_PAGE_SIZE, USERS_PAGE_SIZE_MAX);
+
         let query = db.collection('users');
         if (role) query = query.where('role', '==', role);
 
         const snap = await query.get();
-        const users = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
-        res.json(users);
+        let users = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
+
+        const recherche = normaliser(q).trim();
+        if (recherche) {
+            users = users.filter((u) => {
+                const champs = normaliser(
+                    [u.nom, u.prenom, u.email, u.telephone].filter(Boolean).join(' ')
+                );
+                return champs.includes(recherche);
+            });
+        }
+
+        // Tri stable avant découpage : sans ordre déterministe, un même
+        // utilisateur pourrait apparaître sur deux pages différentes.
+        users.sort((a, b) =>
+            normaliser(a.nom || a.prenom || a.email).localeCompare(
+                normaliser(b.nom || b.prenom || b.email)
+            )
+        );
+
+        const total = users.length;
+        const debut = (page - 1) * limit;
+
+        // En mode `all`, la réponse reste de la même forme : le client n'a pas
+        // à gérer deux structures selon le mode.
+        res.json({
+            data: tout ? users : users.slice(debut, debut + limit),
+            page: tout ? 1 : page,
+            limit: tout ? total : limit,
+            total,
+            totalPages: tout ? 1 : Math.max(1, Math.ceil(total / limit)),
+        });
     } catch (error) {
         console.error("Erreur listUsersByRole:", error.message);
         res.status(500).json({ error: error.message });
     }
 };
 
-// --- TOGGLE STATUT (admin/superadmin) ---
+// --- TOGGLE STATUT (superadmin uniquement) ---
 exports.toggleUserStatut = async (req, res) => {
     try {
         const { uid } = req.params;
+
+        // Garde-fou : un superadmin qui se désactive lui-même se retrouverait
+        // bloqué au login sans personne pour le réactiver.
+        if (req.user?.uid === uid) {
+            return res.status(400).json({ error: "Vous ne pouvez pas désactiver votre propre compte." });
+        }
+
         const userRef = db.collection('users').doc(uid);
         const snap = await userRef.get();
         if (!snap.exists) return res.status(404).json({ error: "Utilisateur introuvable" });

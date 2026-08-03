@@ -12,6 +12,8 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const conversationRoutes = require('./routes/conversationRoutes');
 const pharmacieGardeRoutes = require('./routes/pharmacieGardeRoutes');
 const statsRoutes = require('./routes/statsRoutes');
+const ocrRoutes = require('./routes/ocrRoutes');
+const dossierRoutes = require('./routes/dossierRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
 
 const app = express();
@@ -28,10 +30,12 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/conversations', conversationRoutes);
 app.use('/api/pharmacie-garde', pharmacieGardeRoutes);
 app.use('/api/stats', statsRoutes);
+app.use('/api/ocr', ocrRoutes);
+app.use('/api/dossiers', dossierRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`✅ Serveur Express accessible sur : http://192.168.0.148:${PORT}`);
+    console.log(`✅ Serveur Express accessible sur : http://192.168.43.87:${PORT}`);
 
     // Vérification des médicaments manqués toutes les 15 min.
     // La tolérance étant de 1 h (TOLERANCE_MINUTES=60), un scan aux 15 min

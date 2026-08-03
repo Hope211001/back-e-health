@@ -84,10 +84,12 @@ exports.getPrescriptionsParPeriode = async (req, res) => {
     }
 };
 
+const TOP_MEDECINS_LIMIT = 10;
+
 /**
  * GET /api/stats/prescriptions-par-medecin?periode=semaine|mois|annee
- * Nombre de prescriptions créées par chaque médecin sur la période demandée
- * (même fenêtre que /prescriptions), trié décroissant. Admin et superadmin.
+ * Les 10 médecins ayant créé le plus de prescriptions sur la période demandée
+ * (même fenêtre que /prescriptions), triés décroissant. Admin et superadmin.
  */
 exports.getPrescriptionsParMedecin = async (req, res) => {
     try {
@@ -110,29 +112,40 @@ exports.getPrescriptionsParMedecin = async (req, res) => {
         });
 
         const medecinIds = Object.keys(countsByMedecin);
-        if (medecinIds.length === 0) return res.json({ data: [] });
+        if (medecinIds.length === 0) {
+            return res.json({ total: 0, medecinsDistincts: 0, data: [] });
+        }
 
-        // Résolution des noms de médecins par lots de 30 (limite de la clause 'in' Firestore).
+        // On trie AVANT de découper : les noms ne sont résolus que pour le top 10,
+        // ce qui évite de lire toute la collection users quand il y a beaucoup
+        // de médecins.
+        const topIds = medecinIds
+            .sort((a, b) => countsByMedecin[b] - countsByMedecin[a])
+            .slice(0, TOP_MEDECINS_LIMIT);
+
+        // Résolution des noms par lots de 30 (limite de la clause 'in' Firestore).
         const medecinsInfo = {};
-        for (let i = 0; i < medecinIds.length; i += 30) {
-            const batchIds = medecinIds.slice(i, i + 30);
+        for (let i = 0; i < topIds.length; i += 30) {
+            const batchIds = topIds.slice(i, i + 30);
             const usersSnap = await db.collection('users')
                 .where(admin.firestore.FieldPath.documentId(), 'in', batchIds)
                 .get();
             usersSnap.forEach((d) => { medecinsInfo[d.id] = d.data(); });
         }
 
-        const data = medecinIds
-            .map((id) => {
-                const info = medecinsInfo[id] || {};
-                const nom = (info.prenom || info.nom)
-                    ? `Dr. ${info.prenom || ''} ${info.nom || ''}`.trim()
-                    : (info.email || 'Médecin inconnu');
-                return { medecinId: id, nom, total: countsByMedecin[id] };
-            })
-            .sort((a, b) => b.total - a.total);
+        const data = topIds.map((id) => {
+            const info = medecinsInfo[id] || {};
+            const nom = (info.prenom || info.nom)
+                ? `Dr. ${info.prenom || ''} ${info.nom || ''}`.trim()
+                : (info.email || 'Médecin inconnu');
+            return { medecinId: id, nom, total: countsByMedecin[id] };
+        });
 
-        res.json({ data });
+        res.json({
+            total: medecinIds.reduce((sum, id) => sum + countsByMedecin[id], 0),
+            medecinsDistincts: medecinIds.length,
+            data,
+        });
     } catch (error) {
         console.error("Erreur getPrescriptionsParMedecin:", error.message);
         res.status(500).json({ error: error.message });
@@ -178,7 +191,10 @@ exports.getDiagnosticsFrequents = async (req, res) => {
         const autresTotal = sorted.slice(TOP_DIAGNOSTICS_LIMIT).reduce((sum, d) => sum + d.total, 0);
 
         const data = [...top];
-        if (autresTotal > 0) data.push({ label: 'Autres', total: autresTotal });
+        // 'estAutres' marque la ligne agrégée pour que le client puisse l'exclure
+        // (ex: vue courbe = top 10 strict) sans se fier au libellé, qui pourrait
+        // aussi être un vrai diagnostic saisi par un médecin.
+        if (autresTotal > 0) data.push({ label: 'Autres', total: autresTotal, estAutres: true });
 
         res.json({
             total: sorted.reduce((sum, d) => sum + d.total, 0),
