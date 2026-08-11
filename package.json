@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "create-superadmin": "node scripts/create-superadmin.js"
+    "create-superadmin": "node scripts/create-superadmin.js",
+    "migrer-creePar": "node scripts/migrer-creePar.js",
+    "inventaire-base": "node scripts/inventaire-base.js",
+    "purger-base": "node scripts/purger-base.js"
   },
   "repository": {
     "type": "git",
@@ -25,7 +28,8 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "firebase-admin": "^13.6.1",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "nodemailer": "^9.0.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

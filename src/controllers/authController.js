@@ -1,6 +1,300 @@
+const crypto = require('crypto');
 const { db, auth, admin } = require('../config/firebase');
+const { resoudrePhoto } = require('../services/cloudinaryService');
+const { envoyerIdentifiants, envoyerLienReset } = require('../services/mailService');
 
 // --- HELPERS ---
+
+/** Rôles qu'un superadmin peut créer via /register-admin. */
+const ROLES_ADMINISTRATION = ['admin', 'superadmin'];
+
+/** Sous-collection de détail associée à un rôle, quand il en a une. */
+const COLLECTION_DETAIL = { medecin: 'medecins', patient: 'patients' };
+
+/**
+ * Trace du compte à l'origine d'une création : « ce médecin a été créé par tel
+ * admin », « ce patient par tel médecin ».
+ *
+ * Le RÔLE est figé au moment de la création — c'est un fait historique qui
+ * reste vrai même si le créateur est promu ou rétrogradé ensuite. Le NOM, lui,
+ * n'est volontairement pas recopié : il serait faux dès que le créateur
+ * corrige son état civil. Il est résolu à la lecture depuis `creePar`
+ * (voir resoudreCreateurs).
+ */
+function infosCreateur(req) {
+    return {
+        creePar: req.user?.uid || null,
+        creeParRole: req.user?.role || null,
+    };
+}
+
+/**
+ * Valide un champ texte obligatoire et renvoie sa version nettoyée.
+ *
+ * Une suite d'espaces n'est pas une valeur : sans ce contrôle, un `nom` fait
+ * de blancs passait les validations de longueur côté client comme côté
+ * Firestore, et le compte se retrouvait affiché par son email partout.
+ * Les espaces internes multiples sont réduits à un seul, pour que « Jean   Luc »
+ * et « Jean Luc » ne soient pas deux valeurs différentes dans les tris.
+ */
+function texteRequis(valeur, libelle, max = 100) {
+    const propre = String(valeur ?? '').trim().replace(/\s+/g, ' ');
+    if (!propre) {
+        const err = new Error(`${libelle} est obligatoire.`);
+        err.status = 400;
+        throw err;
+    }
+    if (propre.length > max) {
+        const err = new Error(`${libelle} ne doit pas dépasser ${max} caractères.`);
+        err.status = 400;
+        throw err;
+    }
+    return propre;
+}
+
+/** Email normalisé (minuscules, sans espaces autour) et vérifié. */
+function emailRequis(valeur) {
+    const propre = String(valeur ?? '').trim().toLowerCase();
+    if (!propre) {
+        const err = new Error("L'adresse email est obligatoire.");
+        err.status = 400;
+        throw err;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(propre)) {
+        const err = new Error("Adresse email invalide.");
+        err.status = 400;
+        throw err;
+    }
+    return propre;
+}
+
+/**
+ * Mot de passe : refuse le vide et les mots de passe composés d'espaces.
+ * Le minimum de 6 est celui de Firebase Auth ; les écrans en exigent 8, cette
+ * borne n'est là que pour rendre le message d'erreur lisible en français
+ * plutôt que de laisser remonter celui du SDK.
+ */
+function motDePasseRequis(valeur) {
+    const brut = String(valeur ?? '');
+    if (!brut.trim()) {
+        const err = new Error("Le mot de passe est obligatoire.");
+        err.status = 400;
+        throw err;
+    }
+    if (brut.length < 6) {
+        const err = new Error("Le mot de passe doit faire au moins 6 caractères.");
+        err.status = 400;
+        throw err;
+    }
+    return brut;
+}
+
+/**
+ * Préfixe du mot de passe généré, par rôle. Purement cosmétique : il rend le
+ * mot de passe reconnaissable dans l'email et ne compte pas comme du secret.
+ */
+const PREFIXE_MOT_DE_PASSE = {
+    patient: 'PAT',
+    medecin: 'MED',
+    admin: 'ADM',
+    superadmin: 'SUP',
+};
+
+/**
+ * Mot de passe d'un compte créé par un tiers : préfixe de rôle + 8 chiffres,
+ * par exemple « PAT48190573 ».
+ *
+ * Ce n'est PAS un code provisoire : son titulaire peut le garder indéfiniment.
+ * Il lui est simplement proposé de le remplacer à sa première connexion (voir
+ * `proposerChangementMotDePasse`), proposition qu'il est libre de décliner.
+ *
+ * Format numérique après le préfixe parce qu'il est lu dans un email puis
+ * recopié à la main sur un téléphone : un mot de passe mélangé impose trois
+ * bascules de clavier et la confusion entre l, I et 1. Un compte auquel
+ * personne n'arrive à se connecter ne sert à rien.
+ *
+ * 8 chiffres et non 6 : le mot de passe étant destiné à durer, 900 000
+ * combinaisons seraient devinables par essais automatisés. 8 chiffres en
+ * donnent 100 millions — cent fois plus, pour deux touches de plus et sans
+ * rien perdre du confort de saisie au pavé numérique.
+ *
+ * Le tirage commence à 10000000 pour que le mot de passe fasse toujours
+ * exactement 8 chiffres : un zéro de tête passerait pour décoratif et serait
+ * omis à la saisie.
+ *
+ * `crypto.randomInt` et non `Math.random` : ce dernier n'est pas
+ * cryptographiquement sûr et sa suite se prédit à partir de quelques tirages,
+ * ce qui permettrait de deviner le mot de passe suivant à partir du précédent.
+ */
+function genererMotDePasse(role) {
+    const prefixe = PREFIXE_MOT_DE_PASSE[role] || 'MED';
+    return `${prefixe}${crypto.randomInt(10000000, 100000000)}`;
+}
+
+/**
+ * Mot de passe à utiliser pour un compte en cours de création.
+ *
+ * Le cas normal est l'ABSENCE de `password` dans la requête : les écrans de
+ * création ne le demandent plus, le serveur en génère un et l'envoie par email
+ * au titulaire. Celui qui crée le compte ne le connaît donc jamais.
+ *
+ * Un `password` fourni reste accepté et validé, pour les outils qui créent un
+ * compte hors application (scripts/create-superadmin.js, tests manuels).
+ */
+function motDePasseDuNouveauCompte(valeur, role) {
+    if (valeur === undefined || valeur === null || String(valeur) === '') {
+        return genererMotDePasse(role);
+    }
+    return motDePasseRequis(valeur);
+}
+
+/**
+ * Sexe normalisé : 'M', 'F' ou '' (non renseigné).
+ *
+ * Facultatif à dessein — c'est une donnée personnelle dont ni la connexion ni
+ * les ordonnances ne dépendent, l'exiger bloquerait une création de compte pour
+ * rien. En revanche une valeur fournie doit être exploitable : les dossiers
+ * affichent « Masculin » / « Féminin » à partir de cette lettre exactement, et
+ * un 'Homme' ou un 'm ' passerait pour non renseigné.
+ */
+function sexeOptionnel(valeur) {
+    if (valeur === undefined || valeur === null) return '';
+    const propre = String(valeur).trim().toUpperCase();
+    if (!propre) return '';
+    if (propre !== 'M' && propre !== 'F') {
+        const err = new Error("Sexe invalide : 'M' ou 'F' attendu.");
+        err.status = 400;
+        throw err;
+    }
+    return propre;
+}
+
+/** Texte facultatif nettoyé, avec longueur maximale (adresse, notes…). */
+function texteOptionnel(valeur, libelle, max = 200) {
+    if (valeur === undefined || valeur === null) return '';
+    const propre = String(valeur).trim().replace(/\s+/g, ' ');
+    if (propre.length > max) {
+        const err = new Error(`${libelle} ne doit pas dépasser ${max} caractères.`);
+        err.status = 400;
+        throw err;
+    }
+    return propre;
+}
+
+/** Identité affichable d'un compte, avec repli sur l'email. */
+function identiteCompte(data) {
+    if (!data) return '';
+    return `${data.prenom || ''} ${data.nom || ''}`.trim() || data.email || '';
+}
+
+/**
+ * Résout l'identité des créateurs d'un lot de comptes en UNE seule requête
+ * (`getAll`), plutôt qu'une lecture par ligne affichée.
+ *
+ * Renvoie une Map uid → { uid, identite, role }.
+ */
+async function resoudreCreateurs(utilisateurs) {
+    const uids = [...new Set(utilisateurs.map((u) => u.creePar).filter(Boolean))];
+    if (uids.length === 0) return new Map();
+
+    const snaps = await db.getAll(...uids.map((uid) => db.collection('users').doc(uid)));
+
+    const parUid = new Map();
+    for (const snap of snaps) {
+        if (!snap.exists) continue;
+        const data = snap.data();
+        parUid.set(snap.id, {
+            uid: snap.id,
+            identite: identiteCompte(data),
+            role: data.role || null,
+        });
+    }
+    return parUid;
+}
+
+/**
+ * Bloc « créé par » exposé au client, tolérant aux comptes antérieurs à cette
+ * traçabilité (`creePar` absent) et aux créateurs supprimés depuis.
+ */
+function blocCreateur(utilisateur, createurs) {
+    if (!utilisateur.creePar) return null;
+    const trouve = createurs.get(utilisateur.creePar);
+    return {
+        uid: utilisateur.creePar,
+        // Le rôle figé dans le document prime : il décrit le créateur AU MOMENT
+        // de la création, alors que `trouve.role` est son rôle actuel.
+        role: utilisateur.creeParRole || trouve?.role || null,
+        identite: trouve?.identite || '',
+        // Faux quand le compte créateur a été supprimé depuis.
+        existe: Boolean(trouve),
+    };
+}
+
+/**
+ * Téléverse la photo d'un compte qui vient d'être créé.
+ *
+ * Si l'upload échoue, le compte Firebase Auth est supprimé : sans ça, l'email
+ * resterait pris par un compte sans document Firestore, impossible à recréer
+ * comme à utiliser.
+ */
+async function photoDuNouveauCompte(photo, uid) {
+    if (photo === undefined || photo === null || String(photo).trim() === '') return '';
+    try {
+        return await resoudrePhoto(photo, uid);
+    } catch (error) {
+        await admin.auth().deleteUser(uid).catch((e) =>
+            console.error(`⚠️  Compte Auth ${uid} orphelin après échec photo :`, e.message)
+        );
+        throw error;
+    }
+}
+
+/** Nom du créateur, pour l'email d'identifiants (« créé par Dr Rakoto »). */
+async function identiteDuCreateur(req) {
+    if (!req.user?.uid) return '';
+    try {
+        const snap = await db.collection('users').doc(req.user.uid).get();
+        return snap.exists ? identiteCompte(snap.data()) : '';
+    } catch {
+        // Un créateur non résolu ne justifie pas de priver l'utilisateur de
+        // ses identifiants : le mail part sans la mention « par ... ».
+        return '';
+    }
+}
+
+/**
+ * Envoie ses identifiants au titulaire d'un compte tout juste créé.
+ *
+ * Appelé APRÈS le commit Firestore, et ne lève jamais : contrairement à
+ * l'upload de photo — qui, en échouant, laisserait un compte Auth sans
+ * document et un email définitivement pris — un SMTP en panne ne rend le
+ * compte ni invalide ni inutilisable. L'annuler pour autant ferait dépendre la
+ * création d'utilisateurs de la disponibilité d'un serveur de courrier.
+ *
+ * Le résultat est tracé sur `users/{uid}.identifiantsEnvoyes`, ce qui permet à
+ * l'administration de repérer les envois manqués et de les relancer via
+ * POST /auth/users/:uid/renvoyer-identifiants.
+ */
+async function notifierIdentifiants({ req, uid, email, nom, prenom, role, motDePasse }) {
+    try {
+        const createur = await identiteDuCreateur(req);
+        await envoyerIdentifiants({ email, nom, prenom, role, motDePasse, createur });
+        await db.collection('users').doc(uid).update({
+            identifiantsEnvoyes: true,
+            identifiantsEnvoyesLe: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return true;
+    } catch (error) {
+        // Le mot de passe n'apparaît volontairement pas dans ce log : il ne
+        // doit exister que dans l'email et dans Firebase Auth.
+        console.error(`⚠️  Identifiants non envoyés à ${email} :`, error.message);
+        await db.collection('users').doc(uid)
+            .update({ identifiantsEnvoyes: false })
+            .catch(() => { });
+        return false;
+    }
+}
+
 function formatTelephoneMalgache(tel) {
     let cleanTel = (tel || '').trim().replace(/[\s\-\.\(\)]/g, '');
     const hadPlus = cleanTel.startsWith('+');
@@ -19,7 +313,13 @@ function formatTelephoneMalgache(tel) {
 // --- REGISTER PATIENT (par son médecin traitant, ou par l'administration) ---
 exports.registerPatient = async (req, res) => {
     try {
-        const { email, password, tel, nom, prenom } = req.body;
+        const { tel, photo } = req.body;
+        const email = emailRequis(req.body.email);
+        const motDePasse = motDePasseDuNouveauCompte(req.body.password, 'patient');
+        const nom = texteRequis(req.body.nom, 'Le nom');
+        const prenom = texteRequis(req.body.prenom, 'Le prénom');
+        const sexe = sexeOptionnel(req.body.sexe);
+        const adresse = texteOptionnel(req.body.adresse, "L'adresse");
 
         // Un médecin s'attribue automatiquement le patient. Un admin, lui, doit
         // désigner le médecin traitant : le déduire de son propre token
@@ -43,11 +343,12 @@ exports.registerPatient = async (req, res) => {
 
         const userRecord = await admin.auth().createUser({
             email,
-            password,
+            password: motDePasse,
             phoneNumber: formattedTel
         });
 
         const uid = userRecord.uid;
+        const photoURL = await photoDuNouveauCompte(photo, uid);
         const batch = db.batch();
 
         const userRef = db.collection('users').doc(uid);
@@ -55,13 +356,23 @@ exports.registerPatient = async (req, res) => {
             uid,
             email,
             role: 'patient',
-            // Facultatifs : les écrans de liste retombent sur l'email quand
-            // l'état civil n'est pas renseigné.
-            nom: (nom || '').trim(),
-            prenom: (prenom || '').trim(),
+            nom,
+            prenom,
+            sexe,
+            adresse,
+            photoURL,
             telephone: formattedTel,
             statut: 'actif',
             authProvider: 'password',
+            // Le compte n'a pas choisi son mot de passe, il l'a reçu par email.
+            // L'application lui proposera d'en définir un à sa première
+            // connexion ; le drapeau retombe à false qu'il accepte OU qu'il
+            // refuse, pour ne pas reposer la question à chaque ouverture.
+            proposerChangementMotDePasse: true,
+            // Traçabilité : un patient est créé soit par son médecin traitant,
+            // soit par l'administration — `medecinTraitantId` seul ne permet
+            // pas de distinguer les deux cas.
+            ...infosCreateur(req),
             dateCreation: admin.firestore.FieldValue.serverTimestamp()
         };
 
@@ -70,9 +381,13 @@ exports.registerPatient = async (req, res) => {
             id: uid,
             userId: uid,
             email,
-            nom: (nom || '').trim(),
-            prenom: (prenom || '').trim(),
+            nom,
+            prenom,
+            sexe,
+            adresse,
+            photoURL,
             telephone: formattedTel,
+            ...infosCreateur(req),
             numeroPatient: `PAT-${Date.now().toString().slice(-4)}`,
             medecinTraitantId: medecinId,
             allergies: [],
@@ -85,7 +400,11 @@ exports.registerPatient = async (req, res) => {
         batch.set(patientRef, patientDetail);
         await batch.commit();
 
-        res.status(201).json(patientDetail);
+        const emailEnvoye = await notifierIdentifiants({
+            req, uid, email, nom, prenom, role: 'patient', motDePasse,
+        });
+
+        res.status(201).json({ ...patientDetail, emailEnvoye });
     } catch (error) {
         console.error("Erreur registerPatient:", error.message);
         res.status(error.status || 400).json({ error: error.message });
@@ -95,20 +414,37 @@ exports.registerPatient = async (req, res) => {
 // --- REGISTER MEDECIN (par admin ou superadmin) ---
 exports.registerMedecin = async (req, res) => {
     try {
-        const { email, password, tel, spec, ordre } = req.body;
-        const creePar = req.user.uid;
+        const { tel, spec, ordre, photo } = req.body;
+        const email = emailRequis(req.body.email);
+        const motDePasse = motDePasseDuNouveauCompte(req.body.password, 'medecin');
+        const nom = texteRequis(req.body.nom, 'Le nom');
+        const prenom = texteRequis(req.body.prenom, 'Le prénom');
+        const numeroOrdre = texteRequis(ordre, "Le numéro d'ordre", 50);
+        const sexe = sexeOptionnel(req.body.sexe);
+        const adresse = texteOptionnel(req.body.adresse, "L'adresse");
 
-        const userRecord = await auth.createUser({ email, password });
+        const userRecord = await auth.createUser({ email, password: motDePasse });
         const uid = userRecord.uid;
+        const photoURL = await photoDuNouveauCompte(photo, uid);
         const batch = db.batch();
 
+        // `medecinDetail` reprend ces champs par étalement : l'état civil et la
+        // photo se retrouvent donc aussi dans `medecins/{uid}`, que les écrans
+        // médecin lisent directement.
         const userBase = {
             uid,
             email,
             role: 'medecin',
+            nom,
+            prenom,
+            sexe,
+            adresse,
+            photoURL,
             telephone: tel || '',
             statut: 'actif',
             authProvider: 'password',
+            proposerChangementMotDePasse: true,
+            ...infosCreateur(req),
             dateCreation: admin.firestore.FieldValue.serverTimestamp()
         };
 
@@ -116,47 +452,82 @@ exports.registerMedecin = async (req, res) => {
             ...userBase,
             id: uid,
             userId: uid,
-            specialite: Array.isArray(spec) ? spec : (spec ? [spec] : []),
-            numeroOrdre: ordre || '',
-            creePar
+            // Les spécialités vides sont écartées : une liste [""] afficherait
+            // une puce sans libellé dans le dossier du médecin.
+            specialite: (Array.isArray(spec) ? spec : (spec ? [spec] : []))
+                .map((s) => String(s).trim())
+                .filter(Boolean),
+            numeroOrdre,
         };
 
         batch.set(db.collection('users').doc(uid), userBase);
         batch.set(db.collection('medecins').doc(uid), medecinDetail);
         await batch.commit();
 
-        res.status(201).json(medecinDetail);
+        const emailEnvoye = await notifierIdentifiants({
+            req, uid, email, nom, prenom, role: 'medecin', motDePasse,
+        });
+
+        res.status(201).json({ ...medecinDetail, emailEnvoye });
     } catch (error) {
         console.error("Erreur registration médecin:", error.message);
         res.status(400).json({ error: error.message });
     }
 };
 
-// --- REGISTER ADMIN (superadmin uniquement) ---
+// --- REGISTER ADMIN ou SUPERADMIN (superadmin uniquement) ---
+//
+// Le rôle est un paramètre et non plus une constante : un superadmin doit
+// pouvoir se donner un successeur ou un pair depuis l'application. Le script
+// scripts/create-superadmin.js ne sert qu'à l'amorçage du tout premier compte,
+// quand personne n'est encore connecté pour appeler cette route.
 exports.registerAdmin = async (req, res) => {
     try {
-        const { email, password, tel, nom, prenom } = req.body;
-        const creePar = req.user.uid;
+        const { tel, photo } = req.body;
+        const email = emailRequis(req.body.email);
+        const nom = texteRequis(req.body.nom, 'Le nom');
+        const prenom = texteRequis(req.body.prenom, 'Le prénom');
+        const sexe = sexeOptionnel(req.body.sexe);
+        const adresse = texteOptionnel(req.body.adresse, "L'adresse");
 
-        const userRecord = await auth.createUser({ email, password });
+        const role = String(req.body.role || 'admin').trim();
+        if (!ROLES_ADMINISTRATION.includes(role)) {
+            return res.status(400).json({
+                error: `Rôle invalide : attendu ${ROLES_ADMINISTRATION.join(' ou ')}.`,
+            });
+        }
+
+        // Après la validation du rôle : le préfixe du code temporaire en dépend.
+        const motDePasse = motDePasseDuNouveauCompte(req.body.password, role);
+
+        const userRecord = await auth.createUser({ email, password: motDePasse });
         const uid = userRecord.uid;
+        const photoURL = await photoDuNouveauCompte(photo, uid);
 
         const userBase = {
             uid,
             email,
-            role: 'admin',
-            nom: nom || '',
-            prenom: prenom || '',
+            role,
+            nom,
+            prenom,
+            sexe,
+            adresse,
+            photoURL,
             telephone: tel || '',
             statut: 'actif',
             authProvider: 'password',
-            creePar,
+            proposerChangementMotDePasse: true,
+            ...infosCreateur(req),
             dateCreation: admin.firestore.FieldValue.serverTimestamp()
         };
 
         await db.collection('users').doc(uid).set(userBase);
 
-        res.status(201).json(userBase);
+        const emailEnvoye = await notifierIdentifiants({
+            req, uid, email, nom, prenom, role, motDePasse,
+        });
+
+        res.status(201).json({ ...userBase, emailEnvoye });
     } catch (error) {
         console.error("Erreur registration admin:", error.message);
         res.status(400).json({ error: error.message });
@@ -225,6 +596,25 @@ exports.googleSignIn = async (req, res) => {
             return res.json({ uid, ...userData, ...updates });
         }
 
+        // Aucun document pour cet uid. Avant de créer un profil, vérifier qu'un
+        // compte ne porte pas déjà cette adresse sous un AUTRE uid : ce serait
+        // un compte créé par l'administration (médecin, admin…) dont Firebase
+        // n'a pas fusionné les providers. Le laisser passer créerait un second
+        // compte, patient par défaut — un médecin perdrait son rôle et ses
+        // patients en se connectant simplement avec Google.
+        const homonymes = await db.collection('users').where('email', '==', email).limit(1).get();
+        if (!homonymes.empty) {
+            console.error(
+                `⚠️  Google Sign-In : ${email} existe déjà sous l'uid ${homonymes.docs[0].id}, `
+                + `mais Firebase a émis l'uid ${uid}. Vérifier « one account per email address » `
+                + `dans la console Firebase (Authentication → Settings).`
+            );
+            return res.status(409).json({
+                error: "Un compte existe déjà avec cette adresse email. "
+                    + "Connectez-vous avec votre mot de passe, ou contactez un administrateur.",
+            });
+        }
+
         // Création automatique d'un profil patient par défaut
         const [prenom, ...rest] = name.split(' ');
         const userBase = {
@@ -244,6 +634,11 @@ exports.googleSignIn = async (req, res) => {
             id: uid,
             userId: uid,
             email,
+            // Recopiés depuis le profil Google : sans ça, le document patient
+            // resterait anonyme alors que `users` connaît déjà l'identité.
+            nom: userBase.nom,
+            prenom: userBase.prenom,
+            photoURL: picture || '',
             numeroPatient: `PAT-${Date.now().toString().slice(-4)}`,
             medecinTraitantId: null,
             allergies: [],
@@ -279,11 +674,19 @@ exports.forgotPassword = async (req, res) => {
             return res.json({ message: "Si cet email existe, un lien a été envoyé." });
         }
 
+        // Firebase reste maître du mot de passe : il produit le lien à usage
+        // unique. Nodemailer ne fait que l'acheminer — le service d'envoi
+        // intégré à Firebase impose son quota, son expéditeur et son gabarit.
         const link = await admin.auth().generatePasswordResetLink(email);
 
-        // TODO : envoyer le lien par email via SendGrid/Mailgun.
-        // Pour l'instant on le log côté serveur et on confirme au front.
-        console.log(`🔑 Lien reset password pour ${email} : ${link}`);
+        try {
+            await envoyerLienReset({ email, lien: link });
+        } catch (erreurMail) {
+            // On garde la réponse indifférenciée côté client — signaler l'échec
+            // révélerait que l'adresse existe — mais l'incident doit rester
+            // visible dans les logs du serveur.
+            console.error(`⚠️  Lien de réinitialisation non envoyé à ${email} :`, erreurMail.message);
+        }
 
         res.json({ message: "Si cet email existe, un lien a été envoyé." });
     } catch (error) {
@@ -298,9 +701,94 @@ exports.getUserProfile = async (req, res) => {
         const uid = req.params.uid;
         const userDoc = await db.collection('users').doc(uid).get();
         if (!userDoc.exists) return res.status(404).json({ error: "Utilisateur non trouvé" });
-        res.json(userDoc.data());
+
+        const data = userDoc.data();
+        const createurs = await resoudreCreateurs([data]);
+        res.json({ ...data, createur: blocCreateur(data, createurs) });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * PATCH /api/auth/profile/:uid
+ * Mise à jour de l'état civil, du téléphone et de la photo de profil.
+ *
+ * Qui peut modifier qui :
+ *   - tout le monde son propre compte ;
+ *   - le superadmin, n'importe quel compte ;
+ *   - l'admin, les comptes médecin et patient uniquement — laisser un admin
+ *     éditer un pair ou un superadmin lui donnerait de fait le pouvoir de
+ *     s'attribuer leur identité, alors que la hiérarchie des rôles ne descend
+ *     que vers le bas.
+ *
+ * Le rôle et le statut ne sont volontairement pas modifiables ici : le premier
+ * n'est pas censé changer après création, le second a sa route dédiée qui
+ * révoque en plus les sessions en cours.
+ */
+exports.updateUserProfile = async (req, res) => {
+    try {
+        const { uid } = req.params;
+        const { nom, prenom, tel, photo, sexe, adresse } = req.body;
+
+        const userRef = db.collection('users').doc(uid);
+        const snap = await userRef.get();
+        if (!snap.exists) return res.status(404).json({ error: "Utilisateur non trouvé" });
+
+        const cible = snap.data();
+        const soiMeme = req.user.uid === uid;
+        const autorise = soiMeme
+            || req.user.role === 'superadmin'
+            || (req.user.role === 'admin' && ['medecin', 'patient'].includes(cible.role));
+
+        if (!autorise) {
+            return res.status(403).json({ error: "Vous n'avez pas le droit de modifier ce profil." });
+        }
+
+        // Un champ absent n'est pas touché ; un champ présent doit être valide.
+        // Autoriser le vide ici reviendrait à offrir un moyen d'effacer l'état
+        // civil que les écrans de création interdisent justement.
+        const modifications = {};
+        if (nom !== undefined) modifications.nom = texteRequis(nom, 'Le nom');
+        if (prenom !== undefined) modifications.prenom = texteRequis(prenom, 'Le prénom');
+        if (tel !== undefined) {
+            // Vide accepté : le téléphone n'est pas obligatoire sur tous les rôles.
+            modifications.telephone = String(tel).trim()
+                ? formatTelephoneMalgache(tel)
+                : '';
+        }
+        // Sexe et adresse restent facultatifs après création, y compris pour les
+        // effacer : contrairement à l'état civil, ce sont des données qu'un
+        // utilisateur peut légitimement vouloir retirer de son profil.
+        if (sexe !== undefined) modifications.sexe = sexeOptionnel(sexe);
+        if (adresse !== undefined) modifications.adresse = texteOptionnel(adresse, "L'adresse");
+
+        // Fait en dernier : un échec d'upload ne doit pas laisser un profil à
+        // moitié enregistré (nom modifié, photo non).
+        const photoURL = await resoudrePhoto(photo, uid);
+        if (photoURL !== undefined) modifications.photoURL = photoURL;
+
+        if (Object.keys(modifications).length === 0) {
+            return res.json({ uid, ...cible });
+        }
+
+        const batch = db.batch();
+        batch.update(userRef, modifications);
+
+        // Le document de détail duplique l'état civil : sans cette recopie, les
+        // écrans qui le lisent (tableaux de bord médecin et patient, dossiers)
+        // continueraient d'afficher l'ancienne valeur.
+        const collectionDetail = COLLECTION_DETAIL[cible.role];
+        if (collectionDetail) {
+            const detailRef = db.collection(collectionDetail).doc(uid);
+            if ((await detailRef.get()).exists) batch.update(detailRef, modifications);
+        }
+        await batch.commit();
+
+        res.json({ uid, ...cible, ...modifications });
+    } catch (error) {
+        console.error("Erreur updateUserProfile:", error.message);
+        res.status(error.status || 500).json({ error: error.message });
     }
 };
 
@@ -345,6 +833,11 @@ function entierPositif(valeur, defaut, max) {
  * Liste des utilisateurs, avec recherche libre sur le nom, le prénom, l'email
  * et le téléphone. Admin et superadmin.
  *
+ * `role` accepte plusieurs valeurs séparées par des virgules
+ * (`role=admin,superadmin`) : l'écran d'administration présente les deux
+ * niveaux dans un même onglet. Firestore sait le faire avec `in` sur un champ
+ * unique, sans index composite.
+ *
  * Paginée par défaut (pour les écrans de liste), mais `all=true` renvoie tout :
  * les sélecteurs (choix d'un médecin traitant, par exemple) ont besoin de la
  * liste complète, et une troncature silencieuse y serait un vrai bug.
@@ -363,8 +856,14 @@ exports.listUsersByRole = async (req, res) => {
         const page = entierPositif(req.query.page, 1);
         const limit = entierPositif(req.query.limit, USERS_PAGE_SIZE, USERS_PAGE_SIZE_MAX);
 
+        const roles = String(role || '')
+            .split(',')
+            .map((r) => r.trim())
+            .filter(Boolean);
+
         let query = db.collection('users');
-        if (role) query = query.where('role', '==', role);
+        if (roles.length === 1) query = query.where('role', '==', roles[0]);
+        else if (roles.length > 1) query = query.where('role', 'in', roles);
 
         const snap = await query.get();
         let users = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
@@ -389,11 +888,17 @@ exports.listUsersByRole = async (req, res) => {
 
         const total = users.length;
         const debut = (page - 1) * limit;
+        const affiches = tout ? users : users.slice(debut, debut + limit);
+
+        // Résolu APRÈS le découpage : seuls les comptes réellement renvoyés
+        // coûtent une lecture, et elles tiennent en une requête groupée.
+        const createurs = await resoudreCreateurs(affiches);
+        const data = affiches.map((u) => ({ ...u, createur: blocCreateur(u, createurs) }));
 
         // En mode `all`, la réponse reste de la même forme : le client n'a pas
         // à gérer deux structures selon le mode.
         res.json({
-            data: tout ? users : users.slice(debut, debut + limit),
+            data,
             page: tout ? 1 : page,
             limit: tout ? total : limit,
             total,
@@ -432,6 +937,135 @@ exports.toggleUserStatut = async (req, res) => {
         res.json({ uid, statut: nouveau });
     } catch (error) {
         console.error("Erreur toggleUserStatut:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// --- CHANGEMENT DE MOT DE PASSE (par le titulaire lui-même) ---
+//
+// Réponse « oui » à la proposition faite à la première connexion. Le drapeau
+// `proposerChangementMotDePasse` retombe à false, comme pour un refus : dans
+// les deux cas la question a été posée et ne doit plus revenir.
+//
+// L'ancien mot de passe n'est pas redemandé : l'appelant vient de s'en servir
+// pour obtenir le token que verifyTokenAndRole valide ici, le redemander ne
+// prouverait rien de plus et ajouterait un champ à saisir dans un écran qui
+// doit rester le plus court possible.
+exports.changerMotDePasse = async (req, res) => {
+    try {
+        const uid = req.user.uid;
+        const nouveau = String(req.body.nouveauMotDePasse ?? '');
+
+        if (!nouveau.trim()) {
+            return res.status(400).json({ error: "Le nouveau mot de passe est obligatoire." });
+        }
+        // 8 et non 6 (le minimum de Firebase) : aligné sur ce qu'exigent les
+        // écrans de l'application, pour un message d'erreur cohérent.
+        if (nouveau.length < 8) {
+            return res.status(400).json({
+                error: "Le nouveau mot de passe doit faire au moins 8 caractères.",
+            });
+        }
+
+        await admin.auth().updateUser(uid, { password: nouveau });
+
+        // Pas de revokeRefreshTokens ici, contrairement au renvoi d'identifiants :
+        // c'est le titulaire lui-même qui agit, le déconnecter le renverrait à
+        // l'écran de login juste après avoir choisi son mot de passe.
+        await db.collection('users').doc(uid).update({ proposerChangementMotDePasse: false });
+
+        res.json({ message: "Mot de passe mis à jour." });
+    } catch (error) {
+        console.error("Erreur changerMotDePasse:", error.message);
+        res.status(500).json({ error: "Le mot de passe n'a pas pu être modifié." });
+    }
+};
+
+// --- REFUS DU CHANGEMENT DE MOT DE PASSE ---
+//
+// Réponse « non » à la même proposition : le titulaire garde le mot de passe
+// reçu par email, qui est un mot de passe à part entière et non un code
+// provisoire. On note seulement que la question a été posée, pour ne pas la
+// reposer à chaque ouverture de l'application — ce qui la transformerait en
+// nuisance et pousserait à l'ignorer machinalement.
+exports.conserverMotDePasse = async (req, res) => {
+    try {
+        await db.collection('users').doc(req.user.uid)
+            .update({ proposerChangementMotDePasse: false });
+        res.json({ message: "Mot de passe conservé." });
+    } catch (error) {
+        console.error("Erreur conserverMotDePasse:", error.message);
+        res.status(500).json({ error: "L'enregistrement de votre choix a échoué." });
+    }
+};
+
+// --- RENVOI DES IDENTIFIANTS (admin ou superadmin) ---
+//
+// Rattrape les cas où le titulaire n'a jamais pu se connecter : SMTP en panne
+// au moment de la création, email tombé en indésirables, adresse corrigée
+// depuis. Le mot de passe précédent étant irrécupérable — Firebase ne stocke
+// qu'une empreinte, et c'est heureux — la seule issue est d'en générer un
+// nouveau, ce qui invalide l'ancien.
+exports.renvoyerIdentifiants = async (req, res) => {
+    try {
+        const { uid } = req.params;
+
+        const snap = await db.collection('users').doc(uid).get();
+        if (!snap.exists) return res.status(404).json({ error: "Utilisateur introuvable" });
+
+        const utilisateur = snap.data();
+
+        // Un compte Google n'a pas de mot de passe à renvoyer : son accès passe
+        // par Google. Lui en attribuer un ne l'aiderait pas et ajouterait un
+        // second moyen d'entrer, sans qu'il l'ait demandé.
+        if (utilisateur.authProvider === 'google') {
+            return res.status(400).json({
+                error: "Ce compte se connecte avec Google : il n'a pas de mot de passe à renvoyer.",
+            });
+        }
+
+        const motDePasse = genererMotDePasse(utilisateur.role);
+        await admin.auth().updateUser(uid, { password: motDePasse });
+
+        // Les sessions ouvertes reposaient sur l'ancien mot de passe : les
+        // laisser actives voudrait dire que la personne qui l'avait continue
+        // d'accéder au compte après le renouvellement.
+        await admin.auth().revokeRefreshTokens(uid);
+
+        // Le titulaire repart d'un mot de passe qu'il n'a pas choisi : la
+        // proposition d'en définir un lui sera reposée à sa prochaine connexion,
+        // même s'il l'avait déclinée auparavant.
+        await db.collection('users').doc(uid).update({ proposerChangementMotDePasse: true });
+
+        const emailEnvoye = await notifierIdentifiants({
+            req,
+            uid,
+            email: utilisateur.email,
+            nom: utilisateur.nom,
+            prenom: utilisateur.prenom,
+            role: utilisateur.role,
+            motDePasse,
+        });
+
+        if (!emailEnvoye) {
+            // Le mot de passe a été remplacé mais personne ne l'a reçu : le
+            // compte est momentanément inaccessible. Le dire clairement plutôt
+            // que de laisser croire à un succès.
+            return res.status(502).json({
+                error: "Le mot de passe a été renouvelé, mais l'email n'a pas pu être envoyé. "
+                    + "Vérifiez la configuration SMTP puis relancez l'opération.",
+                emailEnvoye: false,
+            });
+        }
+
+        res.json({
+            uid,
+            email: utilisateur.email,
+            emailEnvoye: true,
+            message: "Un nouveau mot de passe a été envoyé au titulaire du compte.",
+        });
+    } catch (error) {
+        console.error("Erreur renvoyerIdentifiants:", error.message);
         res.status(500).json({ error: error.message });
     }
 };

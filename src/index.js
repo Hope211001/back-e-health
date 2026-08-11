@@ -15,11 +15,15 @@ const statsRoutes = require('./routes/statsRoutes');
 const ocrRoutes = require('./routes/ocrRoutes');
 const dossierRoutes = require('./routes/dossierRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
+const { verifierConfigurationMail } = require('./services/mailService');
 
 const app = express();
 app.use(helmet());
 app.use(cors());
-app.use(express.json());
+// Limite relevée par rapport aux 100 ko par défaut : les photos de profil sont
+// transmises en base64 dans le corps JSON (voir services/cloudinaryService.js),
+// et l'encodage gonfle déjà la taille d'un tiers.
+app.use(express.json({ limit: '8mb' }));
 
 
 // 2. UTILISE LES ROUTES
@@ -43,6 +47,12 @@ app.listen(PORT, "0.0.0.0", () => {
     const CHECK_INTERVAL = 15 * 60 * 1000;
     setInterval(checkMissedMedications, CHECK_INTERVAL);
     console.log(`🔔 Vérification des médicaments manqués activée (toutes les 15 min)`);
+
+    // Test du SMTP au démarrage : sans lui, un mot de passe d'application
+    // erroné ne se découvre qu'à la première création de compte, c'est-à-dire
+    // devant l'utilisateur. La fonction ne lève jamais — un serveur de courrier
+    // en panne ne doit pas empêcher l'API de servir.
+    verifierConfigurationMail();
 
     // NB : le ré-hébergement des images des pharmacies de garde est désormais
     // fait directement dans le workflow n8n (upload Cloudinary avant l'écriture

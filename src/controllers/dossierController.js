@@ -35,6 +35,29 @@ function identite(data) {
     return nom || data.email || '';
 }
 
+/**
+ * Bloc « créé par » d'un compte : qui l'a enregistré, et avec quel rôle.
+ *
+ * Le nom du créateur est relu à la demande plutôt que recopié dans le document
+ * du compte créé : une trace figée deviendrait fausse dès que le créateur
+ * corrige son propre état civil.
+ * Renvoie null pour les comptes antérieurs à cette traçabilité et pour les
+ * inscriptions Google, qui n'ont pas de créateur.
+ */
+async function lireCreateur(data) {
+    if (!data?.creePar) return null;
+
+    const snap = await db.collection('users').doc(data.creePar).get();
+    return {
+        uid: data.creePar,
+        // Le rôle stocké décrit le créateur AU MOMENT de la création ; celui du
+        // document actuel peut avoir changé depuis.
+        role: data.creeParRole || (snap.exists ? snap.data().role : null),
+        identite: snap.exists ? identite(snap.data()) : '',
+        existe: snap.exists,
+    };
+}
+
 /** Prescriptions d'un champ donné (patientId ou medecinId), triées. */
 async function lirePrescriptions(champ, valeur) {
     const snap = await db.collection('prescriptions').where(champ, '==', valeur).get();
@@ -78,6 +101,7 @@ exports.getDossierPatient = async (req, res) => {
                     nom: identite(med) || 'Médecin',
                     email: med.email || '',
                     telephone: med.telephone || '',
+                    photoURL: med.photoURL || '',
                 };
             }
         }
@@ -101,8 +125,13 @@ exports.getDossierPatient = async (req, res) => {
             identite: identite(user),
             email: user.email || '',
             telephone: user.telephone || '',
+            photoURL: user.photoURL || '',
             statut: user.statut || 'actif',
             dateCreation: user.dateCreation || null,
+            createur: await lireCreateur(user),
+            // Distingue « pas de créateur enregistré » d'une inscription Google,
+            // qui n'en a légitimement aucun.
+            authProvider: user.authProvider || null,
             sexe: user.sexe || null,
             dateNaissance: user.dateNaissance || null,
             adresse: user.adresse || '',
@@ -164,6 +193,7 @@ exports.getDossierMedecin = async (req, res) => {
                     identite: identite(data) || data.email || 'Patient',
                     email: data.email || '',
                     telephone: data.telephone || '',
+                    photoURL: data.photoURL || '',
                     numeroPatient: data.numeroPatient || '',
                     statut: data.statut || 'actif',
                     dateCreation: data.dateCreation || null,
@@ -177,8 +207,15 @@ exports.getDossierMedecin = async (req, res) => {
             identite: identite(user),
             email: user.email || '',
             telephone: user.telephone || '',
+            photoURL: user.photoURL || '',
             statut: user.statut || 'actif',
             dateCreation: user.dateCreation || null,
+            createur: await lireCreateur(user),
+            // Distingue « pas de créateur enregistré » d'une inscription Google,
+            // qui n'en a légitimement aucun.
+            authProvider: user.authProvider || null,
+            sexe: user.sexe || null,
+            adresse: user.adresse || '',
             specialite: Array.isArray(medecin.specialite) ? medecin.specialite : [],
             numeroOrdre: medecin.numeroOrdre || '',
             nbPatients: patients.length,

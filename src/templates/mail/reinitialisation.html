@@ -1,0 +1,63 @@
+<!--
+  Email de réinitialisation de mot de passe.
+
+  Variable : {{lien}} — produit par Firebase Auth
+  (`admin.auth().generatePasswordResetLink`). Firebase reste maître du mot de
+  passe ; nodemailer ne fait que porter le message, parce que le service
+  d'envoi intégré à Firebase impose son quota, son expéditeur et son gabarit.
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8;padding:24px 12px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+
+        <tr>
+          <td style="background-color:#059669;padding:24px 28px;">
+            <div style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:0.5px;">Mediora</div>
+            <div style="color:#d1fae5;font-size:13px;margin-top:4px;">Réinitialisation du mot de passe</div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:28px;">
+            <p style="margin:0 0 16px;font-size:16px;color:#0f172a;">Bonjour,</p>
+
+            <p style="margin:0 0 22px;font-size:15px;line-height:1.6;color:#334155;">
+              Une réinitialisation de mot de passe a été demandée pour ce compte
+              Mediora. Cliquez sur le bouton ci-dessous pour en choisir un nouveau.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px;">
+              <tr>
+                <td style="background-color:#059669;border-radius:8px;">
+                  <a href="{{lien}}" style="display:inline-block;padding:13px 26px;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;">Choisir un nouveau mot de passe</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 20px;font-size:13px;line-height:1.6;color:#64748b;word-break:break-all;">
+              Si le bouton ne fonctionne pas, copiez ce lien dans votre navigateur&nbsp;:<br />
+              <a href="{{lien}}" style="color:#047857;">{{lien}}</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc;border-left:4px solid #94a3b8;border-radius:6px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:14px;line-height:1.5;color:#475569;">
+                  Vous n&rsquo;êtes pas à l&rsquo;origine de cette demande&nbsp;? Ignorez cet
+                  email&nbsp;: votre mot de passe actuel reste valable.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="background-color:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 28px;font-size:12px;color:#94a3b8;">
+            Message automatique — merci de ne pas y répondre.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

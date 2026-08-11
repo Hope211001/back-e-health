@@ -1,0 +1,91 @@
+<!--
+  Email « voici vos identifiants », envoyé au compte qui vient d'être créé.
+
+  Variables : {{identite}} {{libelleRole}} {{email}} {{motDePasse}}
+              {{createur}} {{urlApp}}  — les blocs {{#cle}}…{{/cle}} disparaissent
+  quand la variable est vide (voir rendreGabarit dans services/mailService.js).
+
+  Mise en forme volontairement archaïque (tables, styles en ligne, pas de flex
+  ni de CSS externe) : les clients mail — Gmail en tête — suppriment les
+  feuilles de style et ignorent la plupart des propriétés modernes.
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8;padding:24px 12px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background-color:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+
+        <tr>
+          <td style="background-color:#059669;padding:24px 28px;">
+            <div style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:0.5px;">Mediora</div>
+            <div style="color:#d1fae5;font-size:13px;margin-top:4px;">Plateforme de suivi médical</div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:28px;">
+            <p style="margin:0 0 16px;font-size:16px;color:#0f172a;">Bonjour {{identite}},</p>
+
+            <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#334155;">
+              Un compte <strong>{{libelleRole}}</strong> vient d&rsquo;être créé pour vous sur
+              Mediora{{#createur}} par {{createur}}{{/createur}}. Voici vos identifiants
+              de connexion&nbsp;:
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:20px;">
+              <tr>
+                <td style="padding:16px 18px;">
+                  <div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.6px;">Email</div>
+                  <div style="font-size:15px;color:#0f172a;font-weight:600;margin-top:2px;">{{email}}</div>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0 18px 16px;">
+                  <div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.6px;">Mot de passe</div>
+                  <div style="font-family:Consolas,Menlo,monospace;font-size:19px;color:#047857;font-weight:700;letter-spacing:1.5px;margin-top:4px;">{{motDePasse}}</div>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#334155;">
+              Vous pouvez également utiliser le bouton
+              <strong>&laquo;&nbsp;Se connecter avec Google&nbsp;&raquo;</strong>, à condition
+              d&rsquo;employer cette même adresse email&nbsp;: les deux méthodes ouvrent le
+              même compte.
+            </p>
+
+            {{#urlApp}}
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px;">
+              <tr>
+                <td style="background-color:#059669;border-radius:8px;">
+                  <a href="{{urlApp}}" style="display:inline-block;padding:13px 26px;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;">Ouvrir Mediora</a>
+                </td>
+              </tr>
+            </table>
+            {{/urlApp}}
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fffbeb;border-left:4px solid #f59e0b;border-radius:6px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:14px;line-height:1.5;color:#78350f;">
+                  À votre première connexion, l&rsquo;application vous proposera de
+                  définir votre propre mot de passe&nbsp;; vous pourrez aussi
+                  garder celui-ci. Dans tous les cas, ne le transmettez à
+                  personne&nbsp;: aucun membre de l&rsquo;équipe Mediora ne vous
+                  le demandera.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="background-color:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 28px;font-size:12px;color:#94a3b8;line-height:1.5;">
+            Message automatique — merci de ne pas y répondre.<br />
+            Si vous n&rsquo;attendiez pas ce compte, signalez-le à l&rsquo;administrateur
+            qui vous a inscrit.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
