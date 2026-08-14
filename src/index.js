@@ -41,12 +41,19 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Serveur Express accessible sur : http://192.168.43.87:${PORT}`);
 
-    // Vérification des médicaments manqués toutes les 15 min.
-    // La tolérance étant de 1 h (TOLERANCE_MINUTES=60), un scan aux 15 min
-    // suffit à détecter rapidement les oublis, tout en ménageant le quota Firestore.
-    const CHECK_INTERVAL = 15 * 60 * 1000;
+    // Vérification des médicaments manqués toutes les heures.
+    // Le rythme est dicté par le quota Firestore, non par la réactivité voulue :
+    // la requête relit toutes les alertes encore en attente — y compris celles
+    // des jours suivants — donc chaque passage coûte autant de lectures qu'il
+    // reste de doses à venir. À 15 min, le quota gratuit (50 000 lectures/jour)
+    // était dépassé dès une trentaine de patients actifs ; à 1 h, la limite
+    // recule au-delà de la centaine. La tolérance étant elle aussi de 1 h
+    // (TOLERANCE_MINUTES=60), un oubli est signalé au médecin au plus tard
+    // deux heures après l'heure de prise prévue, ce qui reste sans conséquence
+    // pour un suivi d'observance.
+    const CHECK_INTERVAL = 60 * 60 * 1000;
     setInterval(checkMissedMedications, CHECK_INTERVAL);
-    console.log(`🔔 Vérification des médicaments manqués activée (toutes les 15 min)`);
+    console.log(`🔔 Vérification des médicaments manqués activée (toutes les heures)`);
 
     // Test du SMTP au démarrage : sans lui, un mot de passe d'application
     // erroné ne se découvre qu'à la première création de compte, c'est-à-dire

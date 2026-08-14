@@ -11,4 +11,12 @@ router.get('/search', verifyTokenAndRole(['medecin']), patientController.searchP
 
 router.get('/:id', verifyTokenAndRole(['medecin', 'superadmin']), patientController.getPatientById);
 
+// Dossier médical : le contrôleur vérifie en plus que l'appelant est bien LE
+// médecin traitant du patient, le rôle seul ne suffisant pas ici.
+router.patch(
+    '/:id/dossier-medical',
+    verifyTokenAndRole(['medecin']),
+    patientController.updateDossierMedical,
+);
+
 module.exports = router;

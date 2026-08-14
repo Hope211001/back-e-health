@@ -1,7 +1,7 @@
 /**
  * pharmacieGardeRoutes.js
  *
- * Routes CRUD pour la gestion des pharmacies de garde (partie superadmin).
+ * Routes CRUD pour la gestion des pharmacies de garde (partie admin / superadmin).
  */
 const express = require('express');
 const router = express.Router();

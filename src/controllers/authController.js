@@ -169,6 +169,60 @@ function sexeOptionnel(valeur) {
     return propre;
 }
 
+/** Âge au-delà duquel une date de naissance est forcément une faute de saisie. */
+const AGE_MAX = 130;
+
+/**
+ * Date de naissance normalisée en 'AAAA-MM-JJ', ou '' (non renseignée).
+ *
+ * Stockée en CHAÎNE et non en Timestamp : une date de naissance est une date
+ * civile, pas un instant. Un Timestamp est un point précis dans le temps, qui
+ * relu depuis un autre fuseau recule d'un jour — quelqu'un né le 1er du mois
+ * s'afficherait né le dernier jour du mois précédent, et son âge changerait de
+ * valeur au passage d'un anniversaire selon le téléphone qui le consulte.
+ *
+ * Facultative, comme le sexe et l'adresse : l'exiger bloquerait la création
+ * d'un compte pour une donnée dont ni la connexion ni les ordonnances ne
+ * dépendent. Mais une valeur fournie doit être exploitable, puisque c'est
+ * l'âge affiché qui en est calculé.
+ */
+function dateNaissanceOptionnelle(valeur) {
+    if (valeur === undefined || valeur === null) return '';
+    const propre = String(valeur).trim();
+    if (!propre) return '';
+
+    const refuser = (message) => {
+        const err = new Error(message);
+        err.status = 400;
+        throw err;
+    };
+
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(propre);
+    if (!parts) refuser("Date de naissance invalide : format attendu AAAA-MM-JJ.");
+
+    const [, annee, mois, jour] = parts.map(Number);
+    const date = new Date(Date.UTC(annee, mois - 1, jour));
+
+    // Contrôle des trois composantes après coup : `Date` ne rejette pas un 31
+    // février, il le décale silencieusement au 3 mars. Sans cette relecture, une
+    // date inexistante serait acceptée puis réaffichée changée.
+    if (date.getUTCFullYear() !== annee
+        || date.getUTCMonth() !== mois - 1
+        || date.getUTCDate() !== jour) {
+        refuser("Date de naissance invalide : ce jour n'existe pas.");
+    }
+
+    const maintenant = new Date();
+    if (date.getTime() > maintenant.getTime()) {
+        refuser("La date de naissance ne peut pas être dans le futur.");
+    }
+    if (annee < maintenant.getUTCFullYear() - AGE_MAX) {
+        refuser(`Date de naissance invalide : plus de ${AGE_MAX} ans.`);
+    }
+
+    return propre;
+}
+
 /** Texte facultatif nettoyé, avec longueur maximale (adresse, notes…). */
 function texteOptionnel(valeur, libelle, max = 200) {
     if (valeur === undefined || valeur === null) return '';
@@ -320,6 +374,7 @@ exports.registerPatient = async (req, res) => {
         const prenom = texteRequis(req.body.prenom, 'Le prénom');
         const sexe = sexeOptionnel(req.body.sexe);
         const adresse = texteOptionnel(req.body.adresse, "L'adresse");
+        const dateNaissance = dateNaissanceOptionnelle(req.body.dateNaissance);
 
         // Un médecin s'attribue automatiquement le patient. Un admin, lui, doit
         // désigner le médecin traitant : le déduire de son propre token
@@ -359,6 +414,7 @@ exports.registerPatient = async (req, res) => {
             nom,
             prenom,
             sexe,
+            dateNaissance,
             adresse,
             photoURL,
             telephone: formattedTel,
@@ -384,6 +440,7 @@ exports.registerPatient = async (req, res) => {
             nom,
             prenom,
             sexe,
+            dateNaissance,
             adresse,
             photoURL,
             telephone: formattedTel,
@@ -422,6 +479,7 @@ exports.registerMedecin = async (req, res) => {
         const numeroOrdre = texteRequis(ordre, "Le numéro d'ordre", 50);
         const sexe = sexeOptionnel(req.body.sexe);
         const adresse = texteOptionnel(req.body.adresse, "L'adresse");
+        const dateNaissance = dateNaissanceOptionnelle(req.body.dateNaissance);
 
         const userRecord = await auth.createUser({ email, password: motDePasse });
         const uid = userRecord.uid;
@@ -438,6 +496,7 @@ exports.registerMedecin = async (req, res) => {
             nom,
             prenom,
             sexe,
+            dateNaissance,
             adresse,
             photoURL,
             telephone: tel || '',
@@ -489,6 +548,7 @@ exports.registerAdmin = async (req, res) => {
         const prenom = texteRequis(req.body.prenom, 'Le prénom');
         const sexe = sexeOptionnel(req.body.sexe);
         const adresse = texteOptionnel(req.body.adresse, "L'adresse");
+        const dateNaissance = dateNaissanceOptionnelle(req.body.dateNaissance);
 
         const role = String(req.body.role || 'admin').trim();
         if (!ROLES_ADMINISTRATION.includes(role)) {
@@ -511,6 +571,7 @@ exports.registerAdmin = async (req, res) => {
             nom,
             prenom,
             sexe,
+            dateNaissance,
             adresse,
             photoURL,
             telephone: tel || '',
@@ -729,7 +790,7 @@ exports.getUserProfile = async (req, res) => {
 exports.updateUserProfile = async (req, res) => {
     try {
         const { uid } = req.params;
-        const { nom, prenom, tel, photo, sexe, adresse } = req.body;
+        const { nom, prenom, tel, photo, sexe, adresse, dateNaissance } = req.body;
 
         const userRef = db.collection('users').doc(uid);
         const snap = await userRef.get();
@@ -757,11 +818,15 @@ exports.updateUserProfile = async (req, res) => {
                 ? formatTelephoneMalgache(tel)
                 : '';
         }
-        // Sexe et adresse restent facultatifs après création, y compris pour les
-        // effacer : contrairement à l'état civil, ce sont des données qu'un
-        // utilisateur peut légitimement vouloir retirer de son profil.
+        // Sexe, date de naissance et adresse restent facultatifs après création,
+        // y compris pour les effacer : contrairement à l'état civil, ce sont des
+        // données qu'un utilisateur peut légitimement vouloir retirer de son
+        // profil.
         if (sexe !== undefined) modifications.sexe = sexeOptionnel(sexe);
         if (adresse !== undefined) modifications.adresse = texteOptionnel(adresse, "L'adresse");
+        if (dateNaissance !== undefined) {
+            modifications.dateNaissance = dateNaissanceOptionnelle(dateNaissance);
+        }
 
         // Fait en dernier : un échec d'upload ne doit pas laisser un profil à
         // moitié enregistré (nom modifié, photo non).

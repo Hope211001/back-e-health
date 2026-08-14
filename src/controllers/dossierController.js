@@ -215,6 +215,7 @@ exports.getDossierMedecin = async (req, res) => {
             // qui n'en a légitimement aucun.
             authProvider: user.authProvider || null,
             sexe: user.sexe || null,
+            dateNaissance: user.dateNaissance || null,
             adresse: user.adresse || '',
             specialite: Array.isArray(medecin.specialite) ? medecin.specialite : [],
             numeroOrdre: medecin.numeroOrdre || '',
