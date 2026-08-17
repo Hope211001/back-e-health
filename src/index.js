@@ -14,6 +14,8 @@ const pharmacieGardeRoutes = require('./routes/pharmacieGardeRoutes');
 const statsRoutes = require('./routes/statsRoutes');
 const ocrRoutes = require('./routes/ocrRoutes');
 const dossierRoutes = require('./routes/dossierRoutes');
+const etablissementRoutes = require('./routes/etablissementRoutes');
+const geoRoutes = require('./routes/geoRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
 const { verifierConfigurationMail } = require('./services/mailService');
 
@@ -36,6 +38,8 @@ app.use('/api/pharmacie-garde', pharmacieGardeRoutes);
 app.use('/api/stats', statsRoutes);
 app.use('/api/ocr', ocrRoutes);
 app.use('/api/dossiers', dossierRoutes);
+app.use('/api/etablissements', etablissementRoutes);
+app.use('/api/villes', geoRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () => {

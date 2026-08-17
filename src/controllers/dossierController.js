@@ -13,6 +13,29 @@
  * évite d'avoir à créer des index composites.
  */
 const { db } = require('../config/firebase');
+const {
+    dansLePerimetre,
+    resoudreEtablissements,
+    blocEtablissement,
+} = require('../services/etablissementService');
+
+/**
+ * Refuse la consultation d'un dossier hors du périmètre de l'appelant.
+ *
+ * Le cloisonnement des LISTES ne suffit pas : ces routes prennent un uid en
+ * paramètre, et un admin qui en connaîtrait un — par une conversation, une
+ * capture d'écran, un ancien export — lirait sinon le dossier médical complet
+ * d'un patient d'un autre établissement.
+ *
+ * Renvoie `true` quand la requête a été refusée, pour que l'appelant s'arrête.
+ */
+function refuserHorsPerimetre(req, res, document) {
+    if (dansLePerimetre(req, document)) return false;
+    res.status(403).json({
+        error: "Ce dossier appartient à un autre établissement.",
+    });
+    return true;
+}
 
 /** Convertit un Timestamp Firestore (ou une date) en objet Date, sinon null. */
 function toDate(valeur) {
@@ -58,6 +81,15 @@ async function lireCreateur(data) {
     };
 }
 
+/**
+ * Bloc « établissement » d'un compte, relu à la demande — comme le créateur, et
+ * pour la même raison : recopier le nom d'une structure dans chaque compte le
+ * rendrait faux au premier renommage (une fusion d'hôpitaux, ça arrive).
+ */
+async function lireEtablissement(data) {
+    return blocEtablissement(data, await resoudreEtablissements([data]));
+}
+
 /** Prescriptions d'un champ donné (patientId ou medecinId), triées. */
 async function lirePrescriptions(champ, valeur) {
     const snap = await db.collection('prescriptions').where(champ, '==', valeur).get();
@@ -87,6 +119,7 @@ exports.getDossierPatient = async (req, res) => {
         if (user.role !== 'patient') {
             return res.status(400).json({ error: "Ce compte n'est pas un patient." });
         }
+        if (refuserHorsPerimetre(req, res, user)) return;
 
         const patient = patientSnap.exists ? patientSnap.data() : {};
 
@@ -129,6 +162,7 @@ exports.getDossierPatient = async (req, res) => {
             statut: user.statut || 'actif',
             dateCreation: user.dateCreation || null,
             createur: await lireCreateur(user),
+            etablissement: await lireEtablissement(user),
             // Distingue « pas de créateur enregistré » d'une inscription Google,
             // qui n'en a légitimement aucun.
             authProvider: user.authProvider || null,
@@ -171,6 +205,7 @@ exports.getDossierMedecin = async (req, res) => {
         if (user.role !== 'medecin') {
             return res.status(400).json({ error: "Ce compte n'est pas un médecin." });
         }
+        if (refuserHorsPerimetre(req, res, user)) return;
 
         const medecin = medecinSnap.exists ? medecinSnap.data() : {};
 
@@ -211,6 +246,7 @@ exports.getDossierMedecin = async (req, res) => {
             statut: user.statut || 'actif',
             dateCreation: user.dateCreation || null,
             createur: await lireCreateur(user),
+            etablissement: await lireEtablissement(user),
             // Distingue « pas de créateur enregistré » d'une inscription Google,
             // qui n'en a légitimement aucun.
             authProvider: user.authProvider || null,

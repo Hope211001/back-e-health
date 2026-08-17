@@ -9,6 +9,8 @@
     "dev": "nodemon src/index.js",
     "create-superadmin": "node scripts/create-superadmin.js",
     "migrer-creePar": "node scripts/migrer-creePar.js",
+    "migrer-etablissement": "node scripts/migrer-etablissement.js",
+    "seed-geo": "node scripts/seed-geo.js",
     "inventaire-base": "node scripts/inventaire-base.js",
     "purger-base": "node scripts/purger-base.js"
   },

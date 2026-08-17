@@ -4,11 +4,19 @@
  * Efface tout le contenu de la base SAUF :
  *   - les comptes `users` de rôle `superadmin`, et leurs comptes Firebase Auth ;
  *   - la collection `pharamacieGarde` en entier ;
- *   - les documents `ocr` rattachés à une pharmacie de garde conservée.
+ *   - les documents `ocr` rattachés à une pharmacie de garde conservée ;
+ *   - la collection `etablissements`, sauf avec --etablissements (voir plus bas).
  *
  * Usage :
- *   node scripts/purger-base.js            → SIMULATION, n'efface rien
- *   node scripts/purger-base.js --apply    → efface réellement
+ *   node scripts/purger-base.js                     → SIMULATION, n'efface rien
+ *   node scripts/purger-base.js --apply             → efface réellement
+ *   node scripts/purger-base.js --apply --etablissements → efface aussi les établissements
+ *
+ * POURQUOI LES ÉTABLISSEMENTS SONT CONSERVÉS PAR DÉFAUT : ce sont des données
+ * de référence, pas des données de test — au même titre que les pharmacies de
+ * garde. Une purge sert à repartir d'une base d'utilisateurs vierge, pas à
+ * redéclarer la carte sanitaire du pays à chaque fois. Les effacer laisserait
+ * en plus le superadmin sans aucun établissement où créer son premier admin.
  *
  * La simulation est le comportement par défaut, comme pour migrer-creePar :
  * une suppression Firestore est définitive, il n'y a pas de corbeille ni
@@ -22,6 +30,7 @@ require('dotenv').config();
 const { db, admin } = require('../src/config/firebase');
 
 const APPLIQUER = process.argv.includes('--apply');
+const PURGER_ETABLISSEMENTS = process.argv.includes('--etablissements');
 
 /** Collections vidées intégralement. */
 const COLLECTIONS_A_VIDER = [
@@ -118,6 +127,21 @@ async function referencesDe(nom) {
     await supprimerReferences(conversationsSnap.docs.map((c) => c.ref));
     console.log(`  ${'conversations'.padEnd(16)} ${String(conversationsSnap.size).padStart(5)} document(s)`);
     console.log(`  ${'  └ messages'.padEnd(16)} ${String(nbMessages).padStart(5)} document(s)`);
+
+    // --- 4 bis. Établissements (sur demande explicite) ----------------------
+    // Après cette suppression, le superadmin conservé n'a plus aucun
+    // établissement où créer un admin : il devra en enrôler un avant toute
+    // autre opération. D'où le drapeau dédié plutôt qu'une purge d'office.
+    const etablissementsSnap = await db.collection('etablissements').get();
+    if (PURGER_ETABLISSEMENTS) {
+        await supprimerReferences(etablissementsSnap.docs.map((d) => d.ref));
+        console.log(`  ${'etablissements'.padEnd(16)} ${String(etablissementsSnap.size).padStart(5)} document(s)`);
+    } else {
+        console.log(
+            `  ${'etablissements'.padEnd(16)} ${String(etablissementsSnap.size).padStart(5)} document(s) — CONSERVÉS `
+            + `(--etablissements pour les effacer aussi)`
+        );
+    }
 
     // --- 5. OCR orphelins --------------------------------------------------
     await supprimerReferences(ocrOrphelins.map((d) => d.ref));

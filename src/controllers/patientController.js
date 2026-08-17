@@ -1,4 +1,10 @@
 const { db } = require('../config/firebase');
+const {
+    normaliserId,
+    perimetre,
+    dansLePerimetre,
+    verifierEtablissementActif,
+} = require('../services/etablissementService');
 
 /**
  * Groupes sanguins acceptés. Liste fermée et non texte libre : c'est une
@@ -173,6 +179,116 @@ exports.updateDossierMedical = async (req, res) => {
     }
 };
 
+/**
+ * PATCH /api/patients/:id/transfert
+ * Transfère un patient vers un autre établissement et un nouveau médecin
+ * traitant. Admin (de l'établissement de départ ou d'arrivée) et superadmin.
+ *
+ * POURQUOI UNE OPÉRATION DÉDIÉE, et pas un simple changement de médecin :
+ *
+ * L'établissement d'un patient est une donnée à part entière, pas une
+ * conséquence de qui le soigne. Si changer `medecinTraitantId` déplaçait
+ * silencieusement le patient, alors muter un praticien emporterait sa file
+ * entière vers un autre hôpital, et un dossier médical changerait de périmètre
+ * sans que personne ne l'ait décidé ni ne puisse dire quand.
+ *
+ * Les deux champs bougent donc ENSEMBLE et laissent une trace. C'est ce qui
+ * permet de répondre à « ce patient a-t-il toujours été suivi ici ? » — question
+ * à laquelle un simple `etablissementId` ne répond pas.
+ *
+ * Ce qui n'est PAS transféré : les ordonnances passées gardent l'établissement
+ * où elles ont été émises. Ce sont des faits datés ; les réécrire ferait
+ * apparaître dans les statistiques d'un hôpital une activité qui a eu lieu
+ * ailleurs.
+ */
+exports.transfererPatient = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const patientRef = db.collection('patients').doc(id);
+        const patientSnap = await patientRef.get();
+        if (!patientSnap.exists) return res.status(404).json({ error: 'Patient non trouvé' });
+
+        const patient = patientSnap.data();
+        const origine = normaliserId(patient.etablissementId);
+
+        const destination = await verifierEtablissementActif(req.body.etablissementId);
+        if (destination.id === origine) {
+            return res.status(400).json({
+                error: 'Ce patient est déjà suivi dans cet établissement.',
+            });
+        }
+
+        // Le nouveau médecin traitant est obligatoire : un patient transféré
+        // sans praticien sur place n'aurait personne pour lire ses alertes de
+        // prise ni renouveler son traitement — le transfert le rendrait
+        // invisible au lieu de le rattacher.
+        const medecinId = String(req.body.medecinTraitantId || '').trim();
+        if (!medecinId) {
+            return res.status(400).json({
+                error: "Le nouveau médecin traitant est requis (champ 'medecinTraitantId').",
+            });
+        }
+
+        const medecinSnap = await db.collection('users').doc(medecinId).get();
+        if (!medecinSnap.exists || medecinSnap.data().role !== 'medecin') {
+            return res.status(400).json({ error: 'Le médecin traitant indiqué est introuvable.' });
+        }
+        if (normaliserId(medecinSnap.data().etablissementId) !== destination.id) {
+            return res.status(400).json({
+                error: `Ce médecin n'exerce pas à ${destination.nom}.`,
+            });
+        }
+
+        // Un admin ne transfère qu'en lien avec SON établissement : il peut
+        // orienter un de ses patients ailleurs, ou en accueillir un — mais pas
+        // organiser un mouvement entre deux structures qui ne le concernent pas.
+        const portee = perimetre(req);
+        if (portee !== null && portee !== origine && portee !== destination.id) {
+            return res.status(403).json({
+                error: "Ce transfert ne concerne pas votre établissement.",
+            });
+        }
+
+        const modifications = {
+            etablissementId: destination.id,
+            medecinTraitantId: medecinId,
+            etablissementPrecedent: origine,
+            transfereLe: new Date().toISOString(),
+            transferePar: req.user.uid,
+            motifTransfert: String(req.body.motif || '').trim().slice(0, 200),
+        };
+
+        const batch = db.batch();
+        batch.update(patientRef, modifications);
+
+        // `users` porte aussi `etablissementId` — c'est lui que lisent le
+        // cloisonnement des listes et le middleware. Ne mettre à jour que
+        // `patients` laisserait le patient dans son ancien périmètre pour tout
+        // ce qui passe par son compte.
+        const userRef = db.collection('users').doc(id);
+        if ((await userRef.get()).exists) {
+            batch.update(userRef, {
+                etablissementId: destination.id,
+                etablissementPrecedent: origine,
+                transfereLe: modifications.transfereLe,
+                transferePar: req.user.uid,
+            });
+        }
+        await batch.commit();
+
+        res.json({
+            id,
+            ...patient,
+            ...modifications,
+            etablissement: { id: destination.id, nom: destination.nom },
+        });
+    } catch (error) {
+        console.error('Erreur transfererPatient:', error.message);
+        res.status(error.status || 500).json({ error: error.message });
+    }
+};
+
 exports.getPatientById = async (req, res) => {
     try {
         const { id } = req.params;
@@ -196,6 +312,16 @@ exports.getPatientById = async (req, res) => {
         if (!doc.exists || (doc.empty && !doc.data)) {
             console.log("❌ Patient introuvable dans Firestore");
             return res.status(404).json({ error: "Patient non trouvé" });
+        }
+
+        // La route prend un identifiant en paramètre : sans cette garde, un
+        // médecin qui connaîtrait l'id d'un patient d'un autre établissement
+        // lirait sa fiche complète, ce que le filtrage des listes empêche par
+        // ailleurs. Le superadmin, national, n'est pas concerné.
+        if (!dansLePerimetre(req, doc.data())) {
+            return res.status(403).json({
+                error: "Ce patient est suivi dans un autre établissement.",
+            });
         }
 
         console.log("✅ Patient trouvé :", doc.data().email);

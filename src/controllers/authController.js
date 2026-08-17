@@ -2,6 +2,22 @@ const crypto = require('crypto');
 const { db, auth, admin } = require('../config/firebase');
 const { resoudrePhoto } = require('../services/cloudinaryService');
 const { envoyerIdentifiants, envoyerLienReset } = require('../services/mailService');
+const { texteRequis, texteOptionnel } = require('../utils/champs');
+const {
+    normaliserId,
+    dansLePerimetre,
+    filtrerParPerimetre,
+    verifierEtablissementActif,
+    etablissementDuNouveauCompte,
+    etablissementDuMedecin,
+    resoudreEtablissements,
+    blocEtablissement,
+} = require('../services/etablissementService');
+const {
+    verifierVilleActive,
+    chargerReferentielVilles,
+    blocVille,
+} = require('../services/geoService');
 
 // --- HELPERS ---
 
@@ -26,30 +42,6 @@ function infosCreateur(req) {
         creePar: req.user?.uid || null,
         creeParRole: req.user?.role || null,
     };
-}
-
-/**
- * Valide un champ texte obligatoire et renvoie sa version nettoyée.
- *
- * Une suite d'espaces n'est pas une valeur : sans ce contrôle, un `nom` fait
- * de blancs passait les validations de longueur côté client comme côté
- * Firestore, et le compte se retrouvait affiché par son email partout.
- * Les espaces internes multiples sont réduits à un seul, pour que « Jean   Luc »
- * et « Jean Luc » ne soient pas deux valeurs différentes dans les tris.
- */
-function texteRequis(valeur, libelle, max = 100) {
-    const propre = String(valeur ?? '').trim().replace(/\s+/g, ' ');
-    if (!propre) {
-        const err = new Error(`${libelle} est obligatoire.`);
-        err.status = 400;
-        throw err;
-    }
-    if (propre.length > max) {
-        const err = new Error(`${libelle} ne doit pas dépasser ${max} caractères.`);
-        err.status = 400;
-        throw err;
-    }
-    return propre;
 }
 
 /** Email normalisé (minuscules, sans espaces autour) et vérifié. */
@@ -223,16 +215,17 @@ function dateNaissanceOptionnelle(valeur) {
     return propre;
 }
 
-/** Texte facultatif nettoyé, avec longueur maximale (adresse, notes…). */
-function texteOptionnel(valeur, libelle, max = 200) {
-    if (valeur === undefined || valeur === null) return '';
-    const propre = String(valeur).trim().replace(/\s+/g, ' ');
-    if (propre.length > max) {
-        const err = new Error(`${libelle} ne doit pas dépasser ${max} caractères.`);
-        err.status = 400;
-        throw err;
-    }
-    return propre;
+/**
+ * Ville de rattachement d'un compte : identifiant vérifié, ou '' .
+ *
+ * Facultative, contrairement à celle d'un établissement : ni la connexion ni
+ * les ordonnances n'en dépendent, et l'exiger bloquerait la création d'un
+ * compte pour une donnée d'annuaire. Mais une valeur fournie doit exister dans
+ * le référentiel — c'est tout l'intérêt d'être sorti du texte libre.
+ */
+async function villeDuCompte(valeur) {
+    if (valeur === undefined || valeur === null || String(valeur).trim() === '') return '';
+    return (await verifierVilleActive(valeur)).id;
 }
 
 /** Identité affichable d'un compte, avec repli sur l'email. */
@@ -381,6 +374,7 @@ exports.registerPatient = async (req, res) => {
         // rattacherait le patient à un compte admin, ce qui n'a aucun sens
         // métier et casserait les écrans « mes patients » côté médecin.
         let medecinId = req.user.uid;
+        let medecin = req.user;
         if (req.user.role !== 'medecin') {
             medecinId = (req.body.medecinId || '').trim();
             if (!medecinId) {
@@ -392,7 +386,31 @@ exports.registerPatient = async (req, res) => {
             if (!medecinSnap.exists || medecinSnap.data().role !== 'medecin') {
                 return res.status(400).json({ error: "Le médecin traitant indiqué est introuvable." });
             }
+            medecin = medecinSnap.data();
+
+            // Un admin ne peut désigner qu'un médecin de SON établissement.
+            // Sans ce contrôle, il suffirait de connaître l'uid d'un praticien
+            // d'un autre hôpital pour y injecter un patient — et le cloisonnement
+            // des listes ne servirait plus à rien, l'écriture le contournant.
+            if (!dansLePerimetre(req, medecin)) {
+                return res.status(403).json({
+                    error: "Ce médecin n'exerce pas dans votre établissement.",
+                });
+            }
         }
+
+        // Le patient hérite de l'établissement de son médecin traitant, et la
+        // valeur est COPIÉE sur son document : voir etablissementDuMedecin pour
+        // le détail du raisonnement (un médecin muté ne doit pas déplacer ses
+        // patients). Un médecin non rattaché produit '' — le compte reste
+        // créable, mais il n'apparaîtra dans aucune liste d'établissement tant
+        // que la migration n'est pas passée.
+        const etablissementId = etablissementDuMedecin(medecin);
+
+        // Ville de rattachement : facultative, mais vérifiée dans le référentiel
+        // si elle est fournie. Résolue AVANT createUser, comme l'établissement :
+        // une valeur invalide ne doit pas laisser un compte Auth orphelin.
+        const villeId = await villeDuCompte(req.body.villeId);
 
         const formattedTel = formatTelephoneMalgache(tel);
 
@@ -418,6 +436,8 @@ exports.registerPatient = async (req, res) => {
             adresse,
             photoURL,
             telephone: formattedTel,
+            etablissementId,
+            villeId,
             statut: 'actif',
             authProvider: 'password',
             // Le compte n'a pas choisi son mot de passe, il l'a reçu par email.
@@ -444,6 +464,11 @@ exports.registerPatient = async (req, res) => {
             adresse,
             photoURL,
             telephone: formattedTel,
+            // Dupliqué dans `patients` comme le reste de l'état civil : les
+            // listes côté administration lisent ce document, et une jointure
+            // vers `users` par ligne coûterait une lecture de plus par patient.
+            etablissementId,
+            villeId,
             ...infosCreateur(req),
             numeroPatient: `PAT-${Date.now().toString().slice(-4)}`,
             medecinTraitantId: medecinId,
@@ -481,6 +506,18 @@ exports.registerMedecin = async (req, res) => {
         const adresse = texteOptionnel(req.body.adresse, "L'adresse");
         const dateNaissance = dateNaissanceOptionnelle(req.body.dateNaissance);
 
+        // Un admin transmet SON établissement — il ne peut pas recruter pour
+        // l'hôpital voisin. Un superadmin, national et donc sans établissement,
+        // doit désigner celui du médecin dans le corps de la requête.
+        // Résolu AVANT createUser : un rattachement invalide ne doit pas laisser
+        // derrière lui un compte Auth orphelin et une adresse email prise.
+        const etablissementId = await etablissementDuNouveauCompte(req, req.body.etablissementId);
+
+        // Ville de rattachement : facultative, mais vérifiée dans le référentiel
+        // si elle est fournie. Résolue AVANT createUser, comme l'établissement :
+        // une valeur invalide ne doit pas laisser un compte Auth orphelin.
+        const villeId = await villeDuCompte(req.body.villeId);
+
         const userRecord = await auth.createUser({ email, password: motDePasse });
         const uid = userRecord.uid;
         const photoURL = await photoDuNouveauCompte(photo, uid);
@@ -500,6 +537,8 @@ exports.registerMedecin = async (req, res) => {
             adresse,
             photoURL,
             telephone: tel || '',
+            etablissementId,
+            villeId,
             statut: 'actif',
             authProvider: 'password',
             proposerChangementMotDePasse: true,
@@ -530,7 +569,7 @@ exports.registerMedecin = async (req, res) => {
         res.status(201).json({ ...medecinDetail, emailEnvoye });
     } catch (error) {
         console.error("Erreur registration médecin:", error.message);
-        res.status(400).json({ error: error.message });
+        res.status(error.status || 400).json({ error: error.message });
     }
 };
 
@@ -560,6 +599,24 @@ exports.registerAdmin = async (req, res) => {
         // Après la validation du rôle : le préfixe du code temporaire en dépend.
         const motDePasse = motDePasseDuNouveauCompte(req.body.password, role);
 
+        // C'est ICI que se décide la portée d'un compte d'administration, et
+        // c'est le seul endroit de l'application où un établissement se choisit
+        // librement : créer un admin, c'est ouvrir le périmètre d'un
+        // établissement à quelqu'un.
+        //
+        // Un superadmin, lui, n'en reçoit aucun : sa portée est nationale. Lui
+        // en attribuer un le cantonnerait à un hôpital tout en lui laissant les
+        // pouvoirs de l'échelon au-dessus — un rôle qui n'existe pas dans le
+        // modèle. Une valeur transmise par erreur est donc ignorée.
+        const etablissementId = role === 'superadmin'
+            ? ''
+            : (await verifierEtablissementActif(req.body.etablissementId)).id;
+
+        // Ville de rattachement : facultative, mais vérifiée dans le référentiel
+        // si elle est fournie. Résolue AVANT createUser, comme l'établissement :
+        // une valeur invalide ne doit pas laisser un compte Auth orphelin.
+        const villeId = await villeDuCompte(req.body.villeId);
+
         const userRecord = await auth.createUser({ email, password: motDePasse });
         const uid = userRecord.uid;
         const photoURL = await photoDuNouveauCompte(photo, uid);
@@ -575,6 +632,8 @@ exports.registerAdmin = async (req, res) => {
             adresse,
             photoURL,
             telephone: tel || '',
+            etablissementId,
+            villeId,
             statut: 'actif',
             authProvider: 'password',
             proposerChangementMotDePasse: true,
@@ -591,7 +650,7 @@ exports.registerAdmin = async (req, res) => {
         res.status(201).json({ ...userBase, emailEnvoye });
     } catch (error) {
         console.error("Erreur registration admin:", error.message);
-        res.status(400).json({ error: error.message });
+        res.status(error.status || 400).json({ error: error.message });
     }
 };
 
@@ -686,6 +745,12 @@ exports.googleSignIn = async (req, res) => {
             prenom: prenom || '',
             photoURL: picture,
             telephone: '',
+            // Une inscription Google est spontanée : personne ne l'a rattachée
+            // à un établissement, et rien ne permet de le deviner. Le compte
+            // reste hors périmètre jusqu'à ce qu'un médecin le prenne en charge
+            // (voir la route de rattachement), ce qui est exact plutôt que de
+            // le placer arbitrairement quelque part.
+            etablissementId: '',
             statut: 'actif',
             authProvider: 'google',
             dateCreation: admin.firestore.FieldValue.serverTimestamp()
@@ -700,6 +765,7 @@ exports.googleSignIn = async (req, res) => {
             nom: userBase.nom,
             prenom: userBase.prenom,
             photoURL: picture || '',
+            etablissementId: '',
             numeroPatient: `PAT-${Date.now().toString().slice(-4)}`,
             medecinTraitantId: null,
             allergies: [],
@@ -764,8 +830,34 @@ exports.getUserProfile = async (req, res) => {
         if (!userDoc.exists) return res.status(404).json({ error: "Utilisateur non trouvé" });
 
         const data = userDoc.data();
-        const createurs = await resoudreCreateurs([data]);
-        res.json({ ...data, createur: blocCreateur(data, createurs) });
+
+        // Un admin ne consulte que les comptes de son établissement : sans cette
+        // garde, la liste filtrée se contournerait en interrogeant les profils
+        // un à un.
+        //
+        // La règle ne vise QUE l'administration. Un médecin et un patient
+        // s'échangent des messages et consultent leurs profils respectifs ; les
+        // cantonner ici casserait la messagerie dès qu'un des deux n'est pas
+        // encore rattaché (inscription Google, compte antérieur), pour un gain
+        // nul — ils ne peuvent de toute façon voir que les comptes auxquels un
+        // lien de soin les relie déjà.
+        if (req.user.role === 'admin' && req.user.uid !== uid && !dansLePerimetre(req, data)) {
+            return res.status(403).json({ error: "Ce compte n'appartient pas à votre établissement." });
+        }
+
+        const [createurs, etablissements, villes] = await Promise.all([
+            resoudreCreateurs([data]),
+            resoudreEtablissements([data]),
+            chargerReferentielVilles(),
+        ]);
+        res.json({
+            ...data,
+            createur: blocCreateur(data, createurs),
+            etablissement: blocEtablissement(data, etablissements),
+            // Le nom de la ville n'est jamais stocké sur le compte : il est
+            // résolu ici, pour qu'une commune renommée se propage sans migration.
+            ville: blocVille(data, villes),
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -800,7 +892,11 @@ exports.updateUserProfile = async (req, res) => {
         const soiMeme = req.user.uid === uid;
         const autorise = soiMeme
             || req.user.role === 'superadmin'
-            || (req.user.role === 'admin' && ['medecin', 'patient'].includes(cible.role));
+            // L'admin ajoute au filtre de rôle celui du périmètre : son pouvoir
+            // s'exerce sur les médecins et les patients DE SON établissement.
+            || (req.user.role === 'admin'
+                && ['medecin', 'patient'].includes(cible.role)
+                && dansLePerimetre(req, cible));
 
         if (!autorise) {
             return res.status(403).json({ error: "Vous n'avez pas le droit de modifier ce profil." });
@@ -824,6 +920,12 @@ exports.updateUserProfile = async (req, res) => {
         // profil.
         if (sexe !== undefined) modifications.sexe = sexeOptionnel(sexe);
         if (adresse !== undefined) modifications.adresse = texteOptionnel(adresse, "L'adresse");
+        // Effaçable comme le sexe et l'adresse : c'est une donnée d'annuaire,
+        // pas un rattachement administratif. Une chaîne vide la retire, un
+        // identifiant fourni doit exister dans le référentiel.
+        if (req.body.villeId !== undefined) {
+            modifications.villeId = await villeDuCompte(req.body.villeId);
+        }
         if (dateNaissance !== undefined) {
             modifications.dateNaissance = dateNaissanceOptionnelle(dateNaissance);
         }
@@ -933,6 +1035,17 @@ exports.listUsersByRole = async (req, res) => {
         const snap = await query.get();
         let users = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
 
+        // CLOISONNEMENT — un admin ne voit que son établissement, un superadmin
+        // voit le pays. Le filtre est ici, au serveur, et non dans l'écran :
+        // masquer les lignes côté application laisserait
+        // `GET /auth/users?role=patient` renvoyer toute la nation à qui possède
+        // un simple token d'admin.
+        //
+        // En JS après la clause `where` sur le rôle, comme searchPatients et
+        // checkMissedMedications : deux `where` demanderaient un index composite
+        // par combinaison de rôles interrogée.
+        users = filtrerParPerimetre(req, users);
+
         const recherche = normaliser(q).trim();
         if (recherche) {
             users = users.filter((u) => {
@@ -955,10 +1068,22 @@ exports.listUsersByRole = async (req, res) => {
         const debut = (page - 1) * limit;
         const affiches = tout ? users : users.slice(debut, debut + limit);
 
-        // Résolu APRÈS le découpage : seuls les comptes réellement renvoyés
-        // coûtent une lecture, et elles tiennent en une requête groupée.
-        const createurs = await resoudreCreateurs(affiches);
-        const data = affiches.map((u) => ({ ...u, createur: blocCreateur(u, createurs) }));
+        // Résolus APRÈS le découpage : seuls les comptes réellement renvoyés
+        // coûtent une lecture, et chaque résolution tient en une requête groupée.
+        const [createurs, etablissements, villes] = await Promise.all([
+            resoudreCreateurs(affiches),
+            resoudreEtablissements(affiches),
+            // Le référentiel est chargé en entier, une seule fois : c'est ce qui
+            // rend le schéma normalisé viable sans jointure, une lecture par
+            // ligne affichée étant hors de question sur Firestore.
+            chargerReferentielVilles(),
+        ]);
+        const data = affiches.map((u) => ({
+            ...u,
+            createur: blocCreateur(u, createurs),
+            etablissement: blocEtablissement(u, etablissements),
+            ville: blocVille(u, villes),
+        }));
 
         // En mode `all`, la réponse reste de la même forme : le client n'a pas
         // à gérer deux structures selon le mode.
@@ -1064,6 +1189,86 @@ exports.conserverMotDePasse = async (req, res) => {
     }
 };
 
+// --- RATTACHEMENT D'UN COMPTE À UN ÉTABLISSEMENT (superadmin uniquement) ---
+//
+// Sert à deux choses : régulariser les comptes antérieurs au multi-établissement
+// (et les inscriptions Google, qui n'ont pas de créateur pour en transmettre un),
+// et acter la mutation d'un praticien d'une structure vers une autre.
+//
+// Réservé au superadmin, et pas à l'admin de l'établissement d'arrivée : c'est
+// la seule opération qui fait FRANCHIR une frontière de périmètre à un compte.
+// L'ouvrir à un admin lui permettrait d'aspirer les comptes d'un autre hôpital
+// un par un, ce que le cloisonnement des listes cherche justement à empêcher.
+exports.rattacherEtablissement = async (req, res) => {
+    try {
+        const { uid } = req.params;
+
+        const userRef = db.collection('users').doc(uid);
+        const snap = await userRef.get();
+        if (!snap.exists) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+
+        const utilisateur = snap.data();
+        if (utilisateur.role === 'superadmin') {
+            return res.status(400).json({
+                error: "Un super administrateur a une portée nationale : il n'est rattaché à aucun établissement.",
+            });
+        }
+
+        const etablissement = await verifierEtablissementActif(req.body.etablissementId);
+        const precedent = normaliserId(utilisateur.etablissementId);
+        if (precedent === etablissement.id) {
+            return res.status(400).json({ error: 'Ce compte est déjà rattaché à cet établissement.' });
+        }
+
+        const modifications = {
+            etablissementId: etablissement.id,
+            // Sans ces deux champs, un rattachement ne se distingue pas d'une
+            // valeur posée à la création : impossible de savoir si un compte a
+            // été muté, ni quand.
+            etablissementDepuis: new Date().toISOString(),
+            etablissementRattachePar: req.user.uid,
+        };
+
+        const batch = db.batch();
+        batch.update(userRef, modifications);
+
+        const collectionDetail = COLLECTION_DETAIL[utilisateur.role];
+        if (collectionDetail) {
+            const detailRef = db.collection(collectionDetail).doc(uid);
+            if ((await detailRef.get()).exists) batch.update(detailRef, modifications);
+        }
+        await batch.commit();
+
+        // Les patients d'un médecin muté ne le suivent PAS : ils restent dans
+        // l'établissement où ils sont soignés. Les déplacer en cascade
+        // transférerait des dossiers médicaux d'un hôpital à un autre sur la
+        // seule décision d'un mouvement de personnel. Le compte est signalé à
+        // l'appelant pour qu'il sache combien de patients restent à réaffecter
+        // à un praticien sur place.
+        let patientsRestes = 0;
+        if (utilisateur.role === 'medecin') {
+            const patientsSnap = await db.collection('patients')
+                .where('medecinTraitantId', '==', uid)
+                .get();
+            patientsRestes = patientsSnap.size;
+        }
+
+        res.json({
+            uid,
+            etablissementId: etablissement.id,
+            etablissement: { id: etablissement.id, nom: etablissement.nom },
+            patientsRestes,
+            message: patientsRestes
+                ? `Compte rattaché. ${patientsRestes} patient(s) restent dans l'établissement `
+                + `précédent et doivent être réaffectés à un médecin sur place.`
+                : 'Compte rattaché.',
+        });
+    } catch (error) {
+        console.error('Erreur rattacherEtablissement:', error.message);
+        res.status(error.status || 500).json({ error: error.message });
+    }
+};
+
 // --- RENVOI DES IDENTIFIANTS (admin ou superadmin) ---
 //
 // Rattrape les cas où le titulaire n'a jamais pu se connecter : SMTP en panne
@@ -1079,6 +1284,16 @@ exports.renvoyerIdentifiants = async (req, res) => {
         if (!snap.exists) return res.status(404).json({ error: "Utilisateur introuvable" });
 
         const utilisateur = snap.data();
+
+        // Renouveler un mot de passe, c'est couper l'accès de quelqu'un le temps
+        // qu'il relève son courrier : un admin ne peut le faire que dans son
+        // établissement, sinon il pourrait déconnecter le personnel de l'hôpital
+        // voisin.
+        if (!dansLePerimetre(req, utilisateur)) {
+            return res.status(403).json({
+                error: "Ce compte n'appartient pas à votre établissement.",
+            });
+        }
 
         // Un compte Google n'a pas de mot de passe à renvoyer : son accès passe
         // par Google. Lui en attribuer un ne l'aiderait pas et ajouterait un

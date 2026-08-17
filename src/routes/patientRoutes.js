@@ -11,6 +11,15 @@ router.get('/search', verifyTokenAndRole(['medecin']), patientController.searchP
 
 router.get('/:id', verifyTokenAndRole(['medecin', 'superadmin']), patientController.getPatientById);
 
+// Transfert vers un autre établissement, avec changement de médecin traitant.
+// Réservé à l'administration : c'est un mouvement organisationnel, pas un acte
+// de soin, et il fait franchir au dossier une frontière de périmètre.
+router.patch(
+    '/:id/transfert',
+    verifyTokenAndRole(['admin', 'superadmin']),
+    patientController.transfererPatient,
+);
+
 // Dossier médical : le contrôleur vérifie en plus que l'appelant est bien LE
 // médecin traitant du patient, le rôle seul ne suffisant pas ici.
 router.patch(

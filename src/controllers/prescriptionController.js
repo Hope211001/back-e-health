@@ -1,4 +1,5 @@
 const { admin, db } = require('../config/firebase');
+const { TOLERANCE_MINUTES } = require('../services/checkMissedMedications');
 
 exports.createPrescription = async (req, res) => {
     try {
@@ -21,6 +22,13 @@ exports.createPrescription = async (req, res) => {
         const newPrescription = {
             patientId,
             medecinId,
+            // Établissement où l'ordonnance a été émise, copié depuis le médecin
+            // qui la signe. Sans ce champ, les statistiques d'un admin
+            // devraient d'abord lire tous les médecins de son établissement pour
+            // savoir quelles ordonnances lui appartiennent — et resteraient
+            // fausses dès qu'un praticien est muté, puisque son passé
+            // basculerait avec lui dans sa nouvelle structure.
+            etablissementId: String(req.user?.etablissementId ?? '').trim(),
             diagnostic: diagnostic || '',
             medicaments,
             duree: dureeInt,
@@ -137,10 +145,36 @@ function parseMomentsPrise(frequence) {
 }
 
 /**
+ * Vrai si le moment de prise est déjà dépassé au moment du démarrage.
+ *
+ * Sert à ne PAS créer, le jour du démarrage, les prises dont l'heure est
+ * passée : un patient qui confirme son traitement à 20 h voyait apparaître un
+ * « matin 08:00 » et un « midi 12:00 » immédiatement en retard, puis signalés
+ * comme oubliés à son médecin — alors qu'il venait tout juste de commencer.
+ *
+ * La même tolérance que le contrôle des oublis est appliquée, et ce n'est pas
+ * un détail : la règle devient « on ne crée une prise que si elle ne serait pas
+ * déclarée manquée dans la foulée ». À 08 h 20 pour une prise de 08 h, elle
+ * reste donc proposée — le patient a encore le temps de la prendre.
+ */
+function momentDejaPasse(heurePrevu, maintenant) {
+    const [h, m] = String(heurePrevu || '').split(':').map(Number);
+    if (Number.isNaN(h) || Number.isNaN(m)) return false;
+
+    const limite = new Date(maintenant);
+    limite.setHours(h, m + TOLERANCE_MINUTES, 0, 0);
+    return maintenant.getTime() > limite.getTime();
+}
+
+/**
  * Le patient confirme le début de sa prise de médicament.
  * - Lit les horaires personnalisés du patient (matin/midi/soir)
- * - dateDebut = aujourd'hui, dateFin = aujourd'hui + duree, statut = 'en_cours'
- * - Génère les alertes en mappant Matin/Midi/Soir → heures du patient
+ * - dateDebut = maintenant, statut = 'en_cours'
+ * - Génère les alertes en mappant Matin/Midi/Soir → heures du patient,
+ *   EN COMMENÇANT à la première prise encore réalisable (voir momentDejaPasse)
+ * - dateFin est déduite de la dernière prise réellement programmée, et non de
+ *   dateDebut + duree : le nombre de doses prescrites est conservé, quitte à
+ *   déborder d'un jour quand le traitement démarre en cours de journée.
  */
 exports.startPrescription = async (req, res) => {
     try {
@@ -180,33 +214,45 @@ exports.startPrescription = async (req, res) => {
             soir:  horaires.soir  || '20:00',
         };
 
-        // Calcul des nouvelles dates
+        // Le traitement commence À L'INSTANT de la confirmation, pas au début
+        // de la journée : c'est la première prise encore réalisable qui ouvre
+        // le traitement.
         const dateDebut = new Date();
         const duree = parseInt(prescription.duree) || 7;
-        const dateFin = new Date();
-        dateFin.setDate(dateDebut.getDate() + duree);
-
-        // Mise à jour de la prescription (avec horaires figés sur la prescription)
-        await docRef.update({
-            dateDebut: admin.firestore.Timestamp.fromDate(dateDebut),
-            dateFin: admin.firestore.Timestamp.fromDate(dateFin),
-            statut: 'en_cours',
-            horairesRappel: heuresMap,
-        });
 
         // Génération des alertes
         const batch = db.batch();
         const medicaments = prescription.medicaments || [];
         let alerteCount = 0;
+        /** Dernière prise programmée, toutes lignes confondues → dateFin. */
+        let dernierePrise = null;
+        /** Première prise programmée, renvoyée au client pour l'informer. */
+        let premierePrise = null;
 
         for (const med of medicaments) {
             const moments = parseMomentsPrise(med.frequence);
             const medDuree = parseInt(med.duree) || duree;
 
-            for (let jour = 0; jour < medDuree; jour++) {
+            // Nombre de doses réellement prescrites. On le conserve : sauter
+            // les prises déjà passées sans compenser amputerait la cure de
+            // deux doses sur un « 3 fois par jour pendant 7 jours », alors que
+            // l'instruction médicale est d'aller au bout du traitement.
+            const dosesAttendues = medDuree * moments.length;
+
+            let creees = 0;
+            // Un jour de plus que la durée : c'est ce jour supplémentaire qui
+            // absorbe les prises sautées le premier jour. La borne sert aussi
+            // de garde-fou contre une boucle sans fin.
+            for (let jour = 0; jour <= medDuree && creees < dosesAttendues; jour++) {
                 for (const moment of moments) {
+                    if (creees >= dosesAttendues) break;
+
                     const datePrise = new Date(dateDebut);
                     datePrise.setDate(datePrise.getDate() + jour);
+
+                    // Seul le jour du démarrage peut porter des heures déjà
+                    // écoulées ; les jours suivants sont entiers.
+                    if (jour === 0 && momentDejaPasse(heuresMap[moment], dateDebut)) continue;
 
                     const alerteRef = db.collection('alertes').doc();
                     batch.set(alerteRef, {
@@ -222,9 +268,28 @@ exports.startPrescription = async (req, res) => {
                         notificationEnvoyee: false,
                     });
                     alerteCount++;
+                    creees++;
+
+                    if (!dernierePrise || datePrise > dernierePrise) dernierePrise = datePrise;
+                    if (!premierePrise || datePrise < premierePrise) premierePrise = datePrise;
                 }
             }
         }
+
+        // Déduite de la dernière prise, et non de dateDebut + duree : un
+        // traitement démarré le soir se termine un jour plus tard, et une
+        // dateFin trop courte ferait passer les dernières prises pour des
+        // alertes hors traitement.
+        const dateFin = dernierePrise ? new Date(dernierePrise) : new Date(dateDebut);
+        if (!dernierePrise) dateFin.setDate(dateFin.getDate() + duree);
+
+        // Mise à jour de la prescription (avec horaires figés sur la prescription)
+        await docRef.update({
+            dateDebut: admin.firestore.Timestamp.fromDate(dateDebut),
+            dateFin: admin.firestore.Timestamp.fromDate(dateFin),
+            statut: 'en_cours',
+            horairesRappel: heuresMap,
+        });
 
         await batch.commit();
 
@@ -234,6 +299,9 @@ exports.startPrescription = async (req, res) => {
             dateFin: dateFin.toISOString(),
             statut: 'en_cours',
             alertesCrees: alerteCount,
+            // Permet à l'application d'annoncer « première prise ce soir à
+            // 20:00 » plutôt que de laisser croire à un démarrage immédiat.
+            premierePrise: premierePrise ? premierePrise.toISOString() : null,
         });
     } catch (error) {
         console.error("Erreur startPrescription:", error.message);
@@ -310,6 +378,96 @@ exports.markAlertePrise = async (req, res) => {
         res.json({ message: "Médicament marqué comme pris" });
     } catch (error) {
         console.error("Erreur markAlertePrise:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+/**
+ * PUT /api/prescription/alertes/marquer-pris
+ * Marque une prise à partir du CONTEXTE de la notification, et non de l'id de
+ * l'alerte : { prescriptionId, moment, nomMedicament }.
+ *
+ * Pourquoi une route de plus alors que `markAlertePrise` existe déjà : la
+ * notification locale est programmée sur le téléphone au démarrage du
+ * traitement, et elle ne transporte que ce que l'application connaissait à ce
+ * moment-là — le médicament, le moment, la prescription. Jamais l'identifiant
+ * de l'alerte, qui est créé côté serveur.
+ *
+ * L'alternative aurait été d'embarquer cet identifiant dans chaque
+ * notification, mais elle ne répare rien pour les traitements DÉJÀ en cours :
+ * leurs notifications sont programmées, figées dans le système Android, et il
+ * faudrait redémarrer chaque ordonnance pour les régénérer.
+ *
+ * La date n'est pas un paramètre : une prise se déclare pour AUJOURD'HUI. La
+ * rendre choisissable par le client permettrait de réécrire l'observance des
+ * jours passés depuis le téléphone, ce qui viderait la donnée de son sens.
+ */
+exports.marquerPrisParContexte = async (req, res) => {
+    try {
+        const patientId = req.user.uid;
+        const { prescriptionId, moment, nomMedicament } = req.body;
+
+        if (!prescriptionId) {
+            return res.status(400).json({ error: "prescriptionId est obligatoire." });
+        }
+
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+
+        // Une seule clause `where`, filtrage en JS : convention du projet, qui
+        // évite un index composite par combinaison de champs interrogée.
+        const snapshot = await db.collection('alertes')
+            .where('patientId', '==', patientId)
+            .get();
+
+        const candidates = snapshot.docs.filter((doc) => {
+            const a = doc.data();
+            if (a.prescriptionId !== prescriptionId) return false;
+
+            const datePrise = a.datePrise?.toDate ? a.datePrise.toDate() : new Date(a.datePrise);
+            if (!(datePrise >= startOfDay && datePrise < endOfDay)) return false;
+
+            // `moment` et `nomMedicament` affinent quand ils sont fournis. Une
+            // ordonnance porte souvent plusieurs médicaments au même horaire :
+            // sans le nom, un appui sur « J'ai pris » en validerait plusieurs
+            // d'un coup, dont un que le patient n'a pas encore avalé.
+            if (moment && a.moment !== moment) return false;
+            if (nomMedicament && a.nomMedicament !== nomMedicament) return false;
+
+            return true;
+        });
+
+        if (candidates.length === 0) {
+            return res.status(404).json({ error: "Aucune alerte correspondante aujourd'hui." });
+        }
+
+        // Les alertes déjà prises sont ignorées, pas réécrites : `prisLe`
+        // enregistre l'heure réelle de la déclaration, et un second appui —
+        // fréquent, la notification restant parfois affichée — la décalerait.
+        const aMarquer = candidates.filter((doc) => doc.data().statut !== 'pris');
+
+        if (aMarquer.length > 0) {
+            const batch = db.batch();
+            for (const doc of aMarquer) {
+                // Une alerte déjà basculée en `manque` redevient `pris` : c'est
+                // le rattrapage normal quand la déclaration arrive après le
+                // passage du contrôle horaire.
+                batch.update(doc.ref, {
+                    statut: 'pris',
+                    prisLe: admin.firestore.FieldValue.serverTimestamp(),
+                });
+            }
+            await batch.commit();
+        }
+
+        res.json({
+            marquees: aMarquer.length,
+            dejaPrises: candidates.length - aMarquer.length,
+            alerteIds: aMarquer.map((d) => d.id),
+        });
+    } catch (error) {
+        console.error("Erreur marquerPrisParContexte:", error.message);
         res.status(500).json({ error: error.message });
     }
 };

@@ -11,6 +11,7 @@ const { db, admin } = require('../src/config/firebase');
 
 const COLLECTIONS = [
     'users',
+    'etablissements',
     'patients',
     'medecins',
     'prescriptions',

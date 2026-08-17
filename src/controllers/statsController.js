@@ -1,6 +1,26 @@
 const { db, admin } = require('../config/firebase');
+const { filtrerParPerimetre } = require('../services/etablissementService');
 
 const PERIODES_VALIDES = ['semaine', 'mois', 'annee'];
+
+/**
+ * Prescriptions visibles par l'appelant : toutes pour le superadmin, celles de
+ * son établissement pour un admin.
+ *
+ * C'est ce qui donne son sens aux courbes selon qui les regarde : une statistique
+ * de santé publique à l'échelle du pays pour l'autorité nationale, l'activité de
+ * sa propre structure pour un directeur d'hôpital. Une même page qui montrerait
+ * les deux chiffres au même endroit ne voudrait rien dire pour ni l'un ni l'autre.
+ *
+ * Les ordonnances antérieures au multi-établissement ne portent pas le champ :
+ * elles restent visibles du superadmin, et n'apparaissent chez aucun admin
+ * rattaché. Le script de migration les rattache à leur médecin émetteur.
+ */
+async function lirePrescriptionsVisibles(req) {
+    const snapshot = await db.collection('prescriptions').get();
+    const documents = snapshot.docs.map((doc) => doc.data());
+    return filtrerParPerimetre(req, documents);
+}
 
 /** Date de début de la fenêtre glissante correspondant à la période demandée. */
 function getPeriodeStart(periode, now) {
@@ -63,11 +83,11 @@ exports.getPrescriptionsParPeriode = async (req, res) => {
         // éviter un index composite) : filtrage/regroupement en JS, comme pour
         // checkMissedMedications / getAlertesToday.
         const oldestStart = buckets[0].start;
-        const snapshot = await db.collection('prescriptions').get();
+        const prescriptions = await lirePrescriptionsVisibles(req);
 
         const counts = new Array(buckets.length).fill(0);
-        snapshot.forEach((doc) => {
-            const dateCreation = toDate(doc.data().dateCreation);
+        prescriptions.forEach((data) => {
+            const dateCreation = toDate(data.dateCreation);
             if (!dateCreation || dateCreation < oldestStart) return;
             const idx = buckets.findIndex((b) => dateCreation >= b.start && dateCreation < b.end);
             if (idx !== -1) counts[idx]++;
@@ -99,11 +119,10 @@ exports.getPrescriptionsParMedecin = async (req, res) => {
         }
         const periodeStart = getPeriodeStart(periode, new Date());
 
-        const snapshot = await db.collection('prescriptions').get();
+        const prescriptions = await lirePrescriptionsVisibles(req);
 
         const countsByMedecin = {};
-        snapshot.forEach((doc) => {
-            const data = doc.data();
+        prescriptions.forEach((data) => {
             const dateCreation = toDate(data.dateCreation);
             if (!dateCreation || dateCreation < periodeStart) return;
             const medecinId = data.medecinId;
@@ -168,11 +187,10 @@ exports.getDiagnosticsFrequents = async (req, res) => {
         }
         const periodeStart = getPeriodeStart(periode, new Date());
 
-        const snapshot = await db.collection('prescriptions').get();
+        const prescriptions = await lirePrescriptionsVisibles(req);
 
         const countsByDiagnostic = {};
-        snapshot.forEach((doc) => {
-            const data = doc.data();
+        prescriptions.forEach((data) => {
             const dateCreation = toDate(data.dateCreation);
             if (!dateCreation || dateCreation < periodeStart) return;
 

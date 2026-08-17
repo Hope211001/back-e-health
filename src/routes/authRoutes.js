@@ -46,6 +46,16 @@ router.patch(
     authController.toggleUserStatut
 );
 
+// Rattachement d'un compte à un établissement — superadmin uniquement.
+// C'est la seule opération qui fait franchir une frontière de périmètre à un
+// compte : ouverte à l'admin, elle lui permettrait de récupérer les comptes
+// d'un autre établissement un par un.
+router.patch(
+    '/users/:uid/etablissement',
+    verifyTokenAndRole(['superadmin']),
+    authController.rattacherEtablissement
+);
+
 // Les deux réponses à la proposition faite à la première connexion : définir
 // son propre mot de passe, ou garder celui reçu par email. Ouvertes à tous les
 // rôles — le contrôleur agit sur `req.user.uid`, chacun ne touche que le sien.

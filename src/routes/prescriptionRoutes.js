@@ -12,6 +12,12 @@ router.post('/', verifyTokenAndRole(['medecin']), prescriptionController.createP
 // Alertes du patient (rappels du jour)
 router.get('/alertes/today', verifyTokenAndRole(['patient']), prescriptionController.getAlertesToday);
 
+// Marquer une prise depuis le CONTEXTE d'une notification (prescription +
+// moment + médicament), quand l'identifiant de l'alerte n'est pas connu.
+// Déclarée AVANT `/alertes/:id/pris` : « marquer-pris » serait sinon capté
+// comme un `:id`, et l'appel échouerait en 404 sur une alerte inexistante.
+router.put('/alertes/marquer-pris', verifyTokenAndRole(['patient']), prescriptionController.marquerPrisParContexte);
+
 // Marquer une alerte comme prise
 router.put('/alertes/:id/pris', verifyTokenAndRole(['patient']), prescriptionController.markAlertePrise);
 
