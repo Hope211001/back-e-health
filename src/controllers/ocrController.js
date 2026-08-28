@@ -8,9 +8,10 @@
  *   - idpost           : string    id du post Facebook source (confort de lecture)
  *   - images           : string[]  URLs analysées
  *   - texteBrut        : string    texte intégral lu sur les affiches
- *   - pharmacies       : [{ nom, adresse, telephones[] }]
+ *   - pharmacies       : [{ ville, nom, adresse, telephones[] }]
  *   - nbPharmacies     : number
- *   - modele           : string    modèle Groq utilisé
+ *   - nbVilles         : number    villes distinctes détectées sur l'affiche
+ *   - modele           : string    modèle OpenRouter ayant réellement répondu
  *   - erreurs          : [{ imageUrl, message }]  images non lues, s'il y en a
  *   - dateCreation     : Timestamp (première analyse)
  *   - dateModification : Timestamp (dernière ré-analyse)
@@ -20,7 +21,7 @@
  * un simple `doc(id).get()` — sans index ni requête.
  */
 const { admin, db } = require('../config/firebase');
-const { lirePublication } = require('../services/groqOcrService');
+const { lirePublication } = require('../services/ocrPharmacieGardeService');
 
 const COLLECTION = 'ocr';
 const COLLECTION_PHARMACIE = 'pharamacieGarde';
@@ -36,6 +37,7 @@ const mapDoc = (doc) => {
         texteBrut: data.texteBrut || '',
         pharmacies: Array.isArray(data.pharmacies) ? data.pharmacies : [],
         nbPharmacies: data.nbPharmacies || 0,
+        nbVilles: data.nbVilles || 0,
         modele: data.modele || '',
         erreurs: Array.isArray(data.erreurs) ? data.erreurs : [],
         dateCreation: data.dateCreation || null,
@@ -73,6 +75,7 @@ exports.genererPourPharmacieGarde = async (req, res) => {
             texteBrut: resultat.texteBrut,
             pharmacies: resultat.pharmacies,
             nbPharmacies: resultat.pharmacies.length,
+            nbVilles: resultat.nbVilles,
             modele: resultat.modele,
             erreurs: resultat.erreurs,
             dateModification: admin.firestore.FieldValue.serverTimestamp(),

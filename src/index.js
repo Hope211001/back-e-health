@@ -1,4 +1,5 @@
 require('dotenv').config();
+const os = require('os');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -18,6 +19,7 @@ const etablissementRoutes = require('./routes/etablissementRoutes');
 const geoRoutes = require('./routes/geoRoutes');
 const { checkMissedMedications } = require('./services/checkMissedMedications');
 const { verifierConfigurationMail } = require('./services/mailService');
+const { planifierImportAutomatique } = require('./services/ingestionPharmacieGardeService');
 
 const app = express();
 app.use(helmet());
@@ -42,8 +44,22 @@ app.use('/api/etablissements', etablissementRoutes);
 app.use('/api/villes', geoRoutes);
 
 const PORT = process.env.PORT || 5000;
+/**
+ * Adresse LAN de la machine, pour l'afficher au démarrage. Elle était codée en
+ * dur, ce qui la rendait fausse dès un changement de réseau — et c'est
+ * précisément cette valeur qu'il faut recopier dans EXPO_PUBLIC_API_BASE_URL
+ * du .env.local de l'application pour qu'un téléphone joigne le backend.
+ */
+function adresseLan() {
+    const interfaces = Object.values(os.networkInterfaces()).flat();
+    const trouvee = interfaces.find((i) => i && i.family === 'IPv4' && !i.internal);
+    return trouvee ? trouvee.address : 'localhost';
+}
+
 app.listen(PORT, "0.0.0.0", () => {
-    console.log(`✅ Serveur Express accessible sur : http://192.168.43.87:${PORT}`);
+    const hote = adresseLan();
+    console.log(`✅ Serveur Express accessible sur : http://${hote}:${PORT}`);
+    console.log(`   → dans patient-med-app/.env.local : EXPO_PUBLIC_API_BASE_URL="http://${hote}:${PORT}/api"`);
 
     // Vérification des médicaments manqués toutes les heures.
     // Le rythme est dicté par le quota Firestore, non par la réactivité voulue :
@@ -65,8 +81,9 @@ app.listen(PORT, "0.0.0.0", () => {
     // en panne ne doit pas empêcher l'API de servir.
     verifierConfigurationMail();
 
-    // NB : le ré-hébergement des images des pharmacies de garde est désormais
-    // fait directement dans le workflow n8n (upload Cloudinary avant l'écriture
-    // Firestore). L'ancien listener onSnapshot a été supprimé pour ne plus
-    // consommer de quota Firestore en continu.
+    // Import périodique des pharmacies de garde depuis Facebook. Ne fait rien
+    // tant que SCRAPING_INTERVAL_JOURS n'est pas renseigné : chaque passage
+    // consomme du crédit Apify, et l'administrateur déclenche déjà l'import
+    // depuis l'application. L'automatiser doit rester une décision explicite.
+    planifierImportAutomatique();
 });

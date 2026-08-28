@@ -10,9 +10,11 @@ const { verifyTokenAndRole } = require('../middlewares/authMiddleware');
 
 const ROLES = ['superadmin', 'admin'];
 
-// NB : le workflow n8n écrit directement dans Firestore, images déjà ré-hébergées
-// sur Cloudinary (upload fait dans n8n). Pas d'endpoint d'import ni de traitement
-// d'images côté backend.
+// Import depuis Facebook : scraping Apify, tri des publications par un modèle,
+// ré-hébergement Cloudinary et écriture Firestore, le tout côté backend.
+// Déclaré avant '/:id' pour qu'Express ne prenne pas 'scraping' pour un id.
+router.post('/scraping', verifyTokenAndRole(ROLES), ctrl.lancerScraping);
+
 // Côté patient : liste des pharmacies de garde visibles (avant '/:id').
 router.get('/visible', verifyTokenAndRole(['patient', 'medecin', 'admin', 'superadmin']), ctrl.getVisible);
 

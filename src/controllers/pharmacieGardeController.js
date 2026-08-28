@@ -1,8 +1,8 @@
 /**
  * pharmacieGardeController.js
  *
- * CRUD sur la collection "pharamacieGarde" (pharmacies de garde importées
- * via le workflow n8n depuis les pages Facebook).
+ * CRUD sur la collection "pharamacieGarde", et déclenchement de l'import des
+ * publications depuis une page Facebook (services/ingestionPharmacieGardeService.js).
  *
  * Champs d'un document :
  *   - idpost      : string   (identifiant du post source, souvent = ID du doc)
@@ -12,6 +12,7 @@
  *   - attachement : string[] (URLs des pièces jointes / images)
  */
 const { admin, db } = require('../config/firebase');
+const { importerPublications } = require('../services/ingestionPharmacieGardeService');
 
 const COLLECTION = 'pharamacieGarde';
 
@@ -28,6 +29,29 @@ const mapDoc = (doc) => {
         dateCreation: data.dateCreation || null,
         dateModification: data.dateModification || null,
     };
+};
+
+/**
+ * POST /api/pharmacie-garde/scraping
+ * Importe les publications d'une page Facebook (scraping + tri + Cloudinary).
+ *
+ * Corps : { pageUrl?, resultsLimit? }
+ *
+ * L'appel est synchrone et peut durer plusieurs minutes : le scraping attend la
+ * fin de l'actor Apify, puis chaque publication retenue enchaîne un appel de
+ * classification et un ré-hébergement d'images. L'application le sait et
+ * n'attend pas la réponse au-delà de son propre délai — l'import, lui, va
+ * jusqu'au bout côté serveur.
+ */
+exports.lancerScraping = async (req, res) => {
+    try {
+        const { pageUrl, resultsLimit } = req.body || {};
+        const bilan = await importerPublications({ pageUrl, resultsLimit });
+        res.json(bilan);
+    } catch (error) {
+        console.error('❌ lancerScraping pharmacieGarde :', error.message);
+        res.status(error.status || 500).json({ error: error.message });
+    }
 };
 
 // GET /api/pharmacie-garde/visible  (côté patient : seulement les visibles)
@@ -112,7 +136,7 @@ exports.create = async (req, res) => {
         };
 
         // Si un idpost est fourni, on l'utilise comme ID de document (cohérent
-        // avec le workflow n8n) ; sinon on laisse Firestore générer l'ID.
+        // avec l'import automatique) ; sinon on laisse Firestore générer l'ID.
         let ref;
         if (payload.idpost) {
             ref = db.collection(COLLECTION).doc(payload.idpost);

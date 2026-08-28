@@ -9,18 +9,26 @@
  * un preset non signé (n'importe qui pourrait alors remplir le compte), soit
  * d'embarquer l'API secret dans le bundle, d'où il serait extractible.
  *
- * Les affiches de pharmacies de garde, elles, restent uploadées par n8n : la
- * source y est déjà une URL distante, pas un fichier choisi par un utilisateur.
+ * Ce fichier sert aussi au ré-hébergement des affiches de pharmacies de garde
+ * (`televerserDepuisUrl`), dont la source est une URL distante et non un
+ * fichier choisi par un utilisateur. Les deux usages passent par un upload
+ * SIGNÉ : le preset non signé qu'utilisait le workflow n8n est ouvert à qui
+ * connaît son nom, ce qui n'est plus acceptable dès lors que l'appel part du
+ * serveur, où l'API secret est déjà disponible.
  *
- * Variables d'environnement (déjà présentes pour le pipeline n8n) :
+ * Variables d'environnement :
  *   - CLOUDINARY_CLOUD_NAME
  *   - CLOUDINARY_API_KEY
  *   - CLOUDINARY_API_SECRET
- *   - CLOUDINARY_DOSSIER_PHOTOS (optionnel) dossier de destination.
+ *   - CLOUDINARY_DOSSIER_PHOTOS   (optionnel) dossier des photos de profil.
+ *   - CLOUDINARY_DOSSIER_AFFICHES (optionnel) dossier des affiches de garde.
  */
 const crypto = require('crypto');
 
 const DOSSIER_DEFAUT = 'mediora/photos-profil';
+
+/** Dossier des affiches de pharmacies de garde ré-hébergées. */
+const DOSSIER_AFFICHES_DEFAUT = 'pharmacie-garde';
 
 /**
  * Taille maximale de l'image reçue. L'app redimensionne déjà avant l'envoi :
@@ -163,6 +171,78 @@ async function televerserPhotoProfil(donnee, reference) {
 }
 
 /**
+ * Ré-héberge une image distante et renvoie son URL HTTPS Cloudinary.
+ *
+ * Sert aux affiches de pharmacies de garde : les URLs `fbcdn.net` renvoyées par
+ * le scraping portent un paramètre `oe=` qui les fait EXPIRER au bout de
+ * quelques jours. Sans ce ré-hébergement, les publications enregistrées
+ * finiraient toutes avec des images mortes.
+ *
+ * Cloudinary accepte une URL distante dans le champ `file` : c'est lui qui va
+ * chercher l'image. Rien n'est téléchargé par le backend, qui n'a donc pas à
+ * porter le poids des affiches en mémoire.
+ *
+ * @param {string} url       image source (http/https).
+ * @param {string} reference identifiant stable (ex. `post-<idpost>-0`) : relancer
+ *                           l'import écrase la même image au lieu d'en empiler
+ *                           une copie à chaque passage.
+ */
+async function televerserDepuisUrl(url, reference) {
+    const { cloudName, apiKey, apiSecret } = configuration();
+
+    const source = String(url || '').trim();
+    if (!/^https?:\/\//i.test(source)) {
+        const err = new Error('URL d\'image invalide : http(s) attendu.');
+        err.status = 400;
+        throw err;
+    }
+
+    const parametres = {
+        folder: (process.env.CLOUDINARY_DOSSIER_AFFICHES || DOSSIER_AFFICHES_DEFAUT).trim(),
+        invalidate: 'true',
+        overwrite: 'true',
+        public_id: String(reference),
+        timestamp: Math.floor(Date.now() / 1000),
+    };
+
+    const corps = new URLSearchParams({
+        ...parametres,
+        file: source,
+        api_key: apiKey,
+        signature: signer(parametres, apiSecret),
+    });
+
+    let reponse;
+    try {
+        reponse = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: corps,
+        });
+    } catch (error) {
+        const err = new Error(`Cloudinary injoignable : ${error.message}`);
+        err.status = 502;
+        throw err;
+    }
+
+    if (!reponse.ok) {
+        const detail = await reponse.text().catch(() => '');
+        console.error(`❌ Ré-hébergement Cloudinary ${reponse.status} :`, detail.slice(0, 300));
+        const err = new Error(`Ré-hébergement de l'image échoué (${reponse.status}).`);
+        err.status = 502;
+        throw err;
+    }
+
+    const json = await reponse.json();
+    if (!json.secure_url) {
+        const err = new Error('Réponse Cloudinary inattendue : URL absente.');
+        err.status = 502;
+        throw err;
+    }
+    return json.secure_url;
+}
+
+/**
  * Résout le champ `photo` reçu d'un client en une URL stockable.
  *
  * Trois cas, pour que les écrans n'aient pas à distinguer « créer », « garder »
@@ -183,4 +263,9 @@ async function resoudrePhoto(photo, reference) {
     return televerserPhotoProfil(valeur, reference);
 }
 
-module.exports = { televerserPhotoProfil, resoudrePhoto, TAILLE_MAX_OCTETS };
+module.exports = {
+    televerserPhotoProfil,
+    televerserDepuisUrl,
+    resoudrePhoto,
+    TAILLE_MAX_OCTETS,
+};
